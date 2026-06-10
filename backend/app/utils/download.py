@@ -32,6 +32,11 @@ def _download_worker(task_id: str, url: str, project_id: str):
     output_tmpl = str(VIDEOS_DIR / temp_filename_tmpl)
 
     def progress_hook(d):
+        with tasks_lock:
+            task = DOWNLOAD_TASKS.get(task_id)
+            if task and task.get("status") == "cancelled":
+                raise ValueError("Download task cancelled by user")
+
         if d['status'] == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
             downloaded = d.get('downloaded_bytes', 0)
@@ -71,6 +76,12 @@ def _download_worker(task_id: str, url: str, project_id: str):
             # First extract metadata to get exact title or filename
             info = ydl.extract_info(url, download=True)
             
+            # Check if task was cancelled during download
+            with tasks_lock:
+                task = DOWNLOAD_TASKS.get(task_id)
+                if task and task.get("status") == "cancelled":
+                    return
+
             # Find the actual downloaded file name (it should end with .mp4 because of format/merge rules)
             filename = f"{asset_id}.mp4"
             downloaded_file_path = VIDEOS_DIR / filename
@@ -123,6 +134,10 @@ def _download_worker(task_id: str, url: str, project_id: str):
 
     except Exception as e:
         print(f"Error downloading video from {url}: {e}")
+        with tasks_lock:
+            task = DOWNLOAD_TASKS.get(task_id)
+            if task and task.get("status") == "cancelled":
+                return
         update_task_status(task_id, {
             "status": "failed",
             "error": str(e)

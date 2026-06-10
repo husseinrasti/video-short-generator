@@ -50,6 +50,20 @@ def check_transcription_status(task_id: str):
         )
     return task
 
+@router.post("/transcribe/{task_id}/cancel")
+def cancel_transcription(task_id: str):
+    """Cancels a background Whisper transcription task."""
+    from backend.app.utils.whisper_transcribe import TRANSCRIPTION_TASKS, transcription_lock
+    with transcription_lock:
+        task = TRANSCRIPTION_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Transcription task {task_id} not found"
+            )
+        task["status"] = "cancelled"
+    return {"taskId": task_id, "status": "cancelled"}
+
 @router.post("/detect-silence", response_model=List[SilenceSegment])
 def detect_audio_silence(request: SilenceDetectRequest):
     """Detects silences in a video or audio asset's soundtrack."""

@@ -84,6 +84,12 @@ def _transcribe_worker(task_id: str, project_id: str, asset_id: str):
             )
             subtitles.append(sub_item)
             
+        # Check if task was cancelled during transcription
+        with transcription_lock:
+            task = TRANSCRIPTION_TASKS.get(task_id)
+            if task and task.get("status") == "cancelled":
+                return
+
         # Save transcript to subtitles folder as JSON
         transcript_filename = f"transcript_{task_id}.json"
         transcript_path = SUBTITLES_DIR / transcript_filename
@@ -101,6 +107,11 @@ def _transcribe_worker(task_id: str, project_id: str, asset_id: str):
         # For simplicity, we overwrite the subtitle track with these generated subtitles
         project = load_project(project_id)
         if project:
+            # Check if task was cancelled while loading project
+            with transcription_lock:
+                task = TRANSCRIPTION_TASKS.get(task_id)
+                if task and task.get("status") == "cancelled":
+                    return
             project.timeline.tracks.subtitle = subtitles
             save_project(project)
             

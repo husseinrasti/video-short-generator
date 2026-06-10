@@ -54,6 +54,20 @@ def check_download_status(task_id: str):
         )
     return task
 
+@router.post("/download/{task_id}/cancel")
+def cancel_download(task_id: str):
+    """Cancels a background video download task."""
+    from backend.app.utils.download import DOWNLOAD_TASKS, tasks_lock
+    with tasks_lock:
+        task = DOWNLOAD_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Download task {task_id} not found"
+            )
+        task["status"] = "cancelled"
+    return {"taskId": task_id, "status": "cancelled"}
+
 @router.post("/trim", response_model=Asset, status_code=status.HTTP_201_CREATED)
 def trim_existing_video(request: TrimRequest):
     """Cuts a clip from an existing video asset and adds it as a new asset in the project."""

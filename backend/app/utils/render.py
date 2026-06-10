@@ -15,6 +15,10 @@ from backend.app.utils.ffmpeg import FFMPEG_PATH
 RENDER_TASKS: Dict[str, Dict[str, Any]] = {}
 renders_lock = threading.Lock()
 
+# Process tracking for task cancellation
+RENDER_PROCESSES: Dict[str, subprocess.Popen] = {}
+processes_lock = threading.Lock()
+
 RESOLUTIONS = {
     "9:16": {
         "720p": (720, 1280),
@@ -229,38 +233,62 @@ def _render_worker(task_id: str, project_id: str, aspect_ratio: str, resolution:
             bufsize=1
         )
         
-        # Regex to match time=HH:MM:SS.ms
-        time_regex = re.compile(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})")
-        
-        # Read stderr line-by-line to parse progress
-        while True:
-            line = process.stderr.readline()
-            if not line:
-                break
-                
-            match = time_regex.search(line)
-            if match:
-                elapsed_time = _parse_time(match.group(1))
-                progress = min(round((elapsed_time / total_duration) * 100, 1), 99.0)
+        with processes_lock:
+            task = RENDER_TASKS.get(task_id)
+            if task and task.get("status") == "cancelled":
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                return
+            RENDER_PROCESSES[task_id] = process
+
+        try:
+            # Regex to match time=HH:MM:SS.ms
+            time_regex = re.compile(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})")
+            
+            # Read stderr line-by-line to parse progress
+            while True:
+                line = process.stderr.readline()
+                if not line:
+                    break
+                    
+                match = time_regex.search(line)
+                if match:
+                    elapsed_time = _parse_time(match.group(1))
+                    progress = min(round((elapsed_time / total_duration) * 100, 1), 99.0)
+                    with renders_lock:
+                        t = RENDER_TASKS.get(task_id)
+                        if t and t.get("status") == "cancelled":
+                            break
+                    update_render_status(task_id, {
+                        "status": "rendering",
+                        "progress": progress
+                    })
+                    
+            process.wait()
+            
+            with renders_lock:
+                t = RENDER_TASKS.get(task_id)
+                if t and t.get("status") == "cancelled":
+                    return
+
+            if process.returncode == 0:
                 update_render_status(task_id, {
-                    "status": "rendering",
-                    "progress": progress
+                    "status": "completed",
+                    "progress": 100.0,
+                    "outputPath": f"renders/{output_filename}"
                 })
-                
-        process.wait()
-        
-        if process.returncode == 0:
-            update_render_status(task_id, {
-                "status": "completed",
-                "progress": 100.0,
-                "outputPath": f"renders/{output_filename}"
-            })
-        else:
-            stderr_out = process.stderr.read()
-            update_render_status(task_id, {
-                "status": "failed",
-                "error": f"FFmpeg failed with exit code {process.returncode}. {stderr_out}"
-            })
+            else:
+                stderr_out = process.stderr.read()
+                update_render_status(task_id, {
+                    "status": "failed",
+                    "error": f"FFmpeg failed with exit code {process.returncode}. {stderr_out}"
+                })
+        finally:
+            with processes_lock:
+                if task_id in RENDER_PROCESSES:
+                    RENDER_PROCESSES.pop(task_id)
             
     except Exception as e:
         print(f"Error rendering project: {e}")
@@ -292,3 +320,25 @@ def start_render_task(project_id: str, aspect_ratio: str, resolution: str) -> st
     )
     thread.start()
     return task_id
+
+def cancel_render_task(task_id: str) -> bool:
+    """Cancels a timeline rendering task and terminates the FFmpeg process."""
+    with renders_lock:
+        task = RENDER_TASKS.get(task_id)
+        if task:
+            task["status"] = "cancelled"
+    
+    with processes_lock:
+        process = RENDER_PROCESSES.get(task_id)
+        if process:
+            try:
+                process.terminate()
+                process.wait(timeout=1.0)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            RENDER_PROCESSES.pop(task_id, None)
+            return True
+    return False

@@ -22,6 +22,7 @@ class KeysStatusResponse(BaseModel):
 class AIRequest(BaseModel):
     projectId: str
     provider: str = Field("openai", description="openai, anthropic, or gemini")
+    model: Optional[str] = None
 
 class Highlight(BaseModel):
     start: float
@@ -53,6 +54,15 @@ def configure_keys(request: KeysSaveRequest):
     """Saves API keys locally in the storage directory."""
     save_api_keys(request.model_dump())
     return
+
+@router.get("/models")
+async def get_provider_models(provider: str):
+    """Returns available model lists for the specified provider."""
+    keys = load_api_keys()
+    api_key = keys.get(provider.lower(), "").strip()
+    from backend.app.utils.ai import fetch_provider_models
+    models = await fetch_provider_models(provider, api_key)
+    return models
 
 def _get_timeline_transcript(project_id: str) -> str:
     """Combines timeline subtitles into a formatted script with timestamps."""
@@ -96,7 +106,7 @@ async def generate_video_metadata(request: AIRequest):
     prompt = f"Here is the video transcript:\n\n{transcript}"
     
     try:
-        raw_response = await call_llm(request.provider, prompt, system_instruction)
+        raw_response = await call_llm(request.provider, prompt, system_instruction, request.model)
         # Attempt to strip code blocks if model ignored instructions
         clean_json = raw_response.strip()
         if clean_json.startswith("```"):
@@ -136,7 +146,7 @@ async def detect_highlights_api(request: AIRequest):
     prompt = f"Transcript segments:\n\n{transcript}"
     
     try:
-        raw_response = await call_llm(request.provider, prompt, system_instruction)
+        raw_response = await call_llm(request.provider, prompt, system_instruction, request.model)
         clean_json = raw_response.strip()
         if clean_json.startswith("```"):
             clean_json = clean_json.split("\n", 1)[1].rsplit("```", 1)[0].strip()

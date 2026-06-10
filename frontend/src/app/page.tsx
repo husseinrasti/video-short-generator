@@ -286,6 +286,12 @@ export default function VideoEditorWorkspace() {
   const [activeTab, setActiveTab] = useState<"assets" | "subtitles" | "ai" | "settings" | "narration">("assets");
   const [zoomLevel, setZoomLevel] = useState(20);
   
+  // Selection & AI Models list states
+  const [selectedItem, setSelectedItem] = useState<{ id: string; type: "video" | "audio" | "subtitle" | "text" | "image" } | null>(null);
+  const [availableModels, setAvailableModels] = useState<any[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  
   // Trimming tool state (Feature 3)
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(10);
@@ -296,6 +302,7 @@ export default function VideoEditorWorkspace() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
   const playbackIntervalRef = useRef<any>(null);
+  const silenceDetectionAbortControllerRef = useRef<AbortController | null>(null);
   
   // Undo/Redo state stack
   const [past, setPast] = useState<Project[]>([]);
@@ -307,6 +314,13 @@ export default function VideoEditorWorkspace() {
     fetchProjects();
     fetchKeysStatus();
   }, []);
+
+  // Fetch AI models when provider or tab changes
+  useEffect(() => {
+    if (activeTab === "ai" && aiProvider) {
+      fetchAvailableModels(aiProvider);
+    }
+  }, [aiProvider, activeTab]);
 
   // Poll downloads
   useEffect(() => {
@@ -328,7 +342,7 @@ export default function VideoEditorWorkspace() {
   // Poll render task
   useEffect(() => {
     if (!activeRender) return;
-    if (activeRender.status === "completed" || activeRender.status === "failed") return;
+    if (activeRender.status === "completed" || activeRender.status === "failed" || activeRender.status === "cancelled") return;
 
     const interval = setInterval(async () => {
       try {
@@ -336,6 +350,8 @@ export default function VideoEditorWorkspace() {
         if (res.ok) {
           const task = await res.json();
           setActiveRender(task);
+        } else {
+          setActiveRender((prev) => prev ? { ...prev, status: "failed", error: "Failed to poll render status" } : null);
         }
       } catch (err) {
         console.error(err);
@@ -348,7 +364,7 @@ export default function VideoEditorWorkspace() {
   // Poll Whisper transcription
   useEffect(() => {
     if (!activeTranscribe) return;
-    if (activeTranscribe.status === "completed" || activeTranscribe.status === "failed") return;
+    if (activeTranscribe.status === "completed" || activeTranscribe.status === "failed" || activeTranscribe.status === "cancelled") return;
 
     const interval = setInterval(async () => {
       try {
@@ -362,10 +378,17 @@ export default function VideoEditorWorkspace() {
           } else if (task.status === "failed") {
             setIsTranscribing(false);
             alert(`Transcription failed: ${task.error}`);
+          } else if (task.status === "cancelled") {
+            setIsTranscribing(false);
           }
+        } else {
+          setIsTranscribing(false);
+          setActiveTranscribe((prev) => prev ? { ...prev, status: "failed", error: "Failed to poll transcription status" } : null);
         }
       } catch (err) {
         console.error(err);
+        setIsTranscribing(false);
+        setActiveTranscribe((prev) => prev ? { ...prev, status: "failed", error: "Connection error polling transcription" } : null);
       }
     }, 1000);
 
@@ -540,6 +563,7 @@ export default function VideoEditorWorkspace() {
                 }
                 const relativeTime = nextTime - activeItem.start + activeItem.sourceStart;
                 if (videoRef.current) {
+                  videoRef.current.muted = activeItem.muted || false;
                   if (Math.abs(videoRef.current.currentTime - relativeTime) > 0.3) {
                     videoRef.current.currentTime = relativeTime;
                   }
@@ -834,32 +858,236 @@ export default function VideoEditorWorkspace() {
     }
   };
 
-  const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newTime = parseFloat(e.target.value);
-    setCurrentTime(newTime);
-    
+  const seekPlaybackToTime = (targetTime: number) => {
+    setCurrentTime(targetTime);
     if (isTimelinePlayback) {
       if (activeProject) {
         const activeItem = activeProject.timeline.tracks.video.find(
-          (item) => newTime >= item.start && newTime < item.start + item.duration
+          (item) => targetTime >= item.start && targetTime < item.start + item.duration
         );
         if (activeItem) {
           const asset = activeProject.assets.find((a) => a.id === activeItem.assetId);
           if (asset) {
             if (selectedAsset?.id !== asset.id) setSelectedAsset(asset);
-            const relativeTime = newTime - activeItem.start + activeItem.sourceStart;
+            const relativeTime = targetTime - activeItem.start + activeItem.sourceStart;
             if (videoRef.current) {
+              videoRef.current.muted = activeItem.muted || false;
               videoRef.current.currentTime = relativeTime;
             }
+          }
+        } else {
+          if (videoRef.current && !videoRef.current.paused) {
+            videoRef.current.pause();
           }
         }
       }
     } else {
       if (videoRef.current) {
-        videoRef.current.currentTime = newTime;
+        videoRef.current.muted = false;
+        videoRef.current.currentTime = targetTime;
       }
     }
   };
+
+  const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newTime = parseFloat(e.target.value);
+    seekPlaybackToTime(newTime);
+  };
+
+  const handleCancelDownload = async (taskId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/videos/download/${taskId}/cancel`, { method: "POST" });
+      if (res.ok) {
+        setActiveDownloads((prev) => ({
+          ...prev,
+          [taskId]: { ...prev[taskId], status: "cancelled" }
+        }));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleRetryDownload = async (task: DownloadTask) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/videos/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: task.url, projectId: task.projectId })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActiveDownloads((prev) => {
+          const next = { ...prev };
+          delete next[task.id];
+          next[data.taskId] = {
+            id: data.taskId,
+            url: task.url,
+            projectId: task.projectId,
+            status: data.status,
+            progress: 0
+          };
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCancelTranscribe = async () => {
+    if (!activeTranscribe) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/audio/transcribe/${activeTranscribe.id}/cancel`, { method: "POST" });
+      if (res.ok) {
+        setIsTranscribing(false);
+        setActiveTranscribe((prev) => prev ? { ...prev, status: "cancelled" } : null);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCancelRender = async () => {
+    if (!activeRender) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/timeline/render/${activeRender.id}/cancel`, { method: "POST" });
+      if (res.ok) {
+        setActiveRender((prev) => prev ? { ...prev, status: "cancelled" } : null);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCancelSilenceDetection = () => {
+    if (silenceDetectionAbortControllerRef.current) {
+      silenceDetectionAbortControllerRef.current.abort();
+    }
+  };
+
+  const handleToggleMuteItem = async (trackType: "video" | "audio", itemId: string) => {
+    if (!activeProject) return;
+    const updatedProject = { ...activeProject };
+    if (trackType === "video") {
+      updatedProject.timeline.tracks.video = updatedProject.timeline.tracks.video.map((item) => {
+        if (item.id === itemId) return { ...item, muted: !item.muted };
+        return item;
+      });
+    }
+    await updateProjectState(updatedProject);
+  };
+
+  const handleToggleMuteSelected = async () => {
+    if (!activeProject || !selectedItem || selectedItem.type !== "video") return;
+    await handleToggleMuteItem("video", selectedItem.id);
+  };
+
+  const handleDuplicateSelected = async () => {
+    if (!activeProject || !selectedItem) return;
+    const { id, type } = selectedItem;
+    const track = activeProject.timeline.tracks[type] as any[];
+    const item = track.find((i) => i.id === id);
+    if (!item) return;
+
+    const newItem = {
+      ...item,
+      id: Math.random().toString(36).substring(2, 9),
+      start: item.start + item.duration
+    };
+
+    const updatedProject = { ...activeProject };
+    const updatedTrack = (updatedProject.timeline.tracks[type] as any[]).map((i) => {
+      if (i.start >= item.start + item.duration) {
+        return { ...i, start: i.start + item.duration };
+      }
+      return i;
+    });
+    updatedTrack.push(newItem);
+    updatedProject.timeline.tracks[type] = updatedTrack;
+
+    await updateProjectState(updatedProject);
+    setSelectedItem({ id: newItem.id, type });
+  };
+
+  const fetchAvailableModels = async (provider: string, forceRefresh = false) => {
+    setIsLoadingModels(true);
+    try {
+      const url = `${API_BASE}/api/ai/models?provider=${provider}${forceRefresh ? "&refresh=true" : ""}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableModels(data);
+        if (data.length > 0) {
+          if (!data.some((m: any) => m.id === selectedModel)) {
+            setSelectedModel(data[0].id);
+          }
+        } else {
+          setSelectedModel("");
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
+  const handleRulerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const updateTimeFromX = (clientX: number) => {
+      const x = clientX - rect.left;
+      const newTime = Math.max(0, Math.min(maxTimelineDuration, x / zoomLevel));
+      seekPlaybackToTime(newTime);
+    };
+    
+    updateTimeFromX(e.clientX);
+    
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateTimeFromX(moveEvent.clientX);
+    };
+    
+    const handlePointerUp = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+    
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  };
+
+  const renderRulerTicks = () => {
+    const ticks = [];
+    const duration = maxTimelineDuration;
+    
+    let interval = 5;
+    if (zoomLevel < 10) interval = 10;
+    if (zoomLevel > 30) interval = 2;
+    
+    for (let i = 0; i <= duration; i += 1) {
+      const isMajor = i % interval === 0;
+      const leftPx = i * zoomLevel;
+      
+      ticks.push(
+        <div
+          key={i}
+          className="absolute bottom-0 border-l border-indigo-900/60"
+          style={{
+            left: `${leftPx}px`,
+            height: isMajor ? "10px" : "5px"
+          }}
+        >
+          {isMajor && (
+            <span className="absolute left-0.5 bottom-1 text-[7px] text-gray-500 font-mono select-none pointer-events-none">
+              {formatTime(i).split(".")[0]}
+            </span>
+          )}
+        </div>
+      );
+    }
+    return ticks;
+  };
+
 
   // Timeline Addition
   const handleAddToTimeline = async (asset: Asset) => {
@@ -1122,7 +1350,8 @@ export default function VideoEditorWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId: activeProject.id,
-          provider: aiProvider
+          provider: aiProvider,
+          model: selectedModel
         })
       });
       if (res.ok) {
@@ -1151,7 +1380,8 @@ export default function VideoEditorWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId: activeProject.id,
-          provider: aiProvider
+          provider: aiProvider,
+          model: selectedModel
         })
       });
       if (res.ok) {
@@ -1233,6 +1463,15 @@ export default function VideoEditorWorkspace() {
   // Silence Detection API call
   const handleDetectSilence = async () => {
     if (!selectedAsset || !activeProject) return;
+    
+    // Abort previous if any
+    if (silenceDetectionAbortControllerRef.current) {
+      silenceDetectionAbortControllerRef.current.abort();
+    }
+    
+    const controller = new AbortController();
+    silenceDetectionAbortControllerRef.current = controller;
+    
     setIsDetectingSilence(true);
     setDetectedSilences([]);
     try {
@@ -1244,7 +1483,8 @@ export default function VideoEditorWorkspace() {
           assetId: selectedAsset.id,
           noiseThreshold,
           minDuration: minSilenceDuration
-        })
+        }),
+        signal: controller.signal
       });
       if (res.ok) {
         const data = await res.json();
@@ -1256,11 +1496,16 @@ export default function VideoEditorWorkspace() {
         const err = await res.json();
         alert(`Silence detection failed: ${err.detail || "Unknown error"}`);
       }
-    } catch (err) {
-      console.error("Silence detection failed", err);
-      alert("Connection error executing silence detection.");
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        console.log("Silence detection aborted");
+      } else {
+        console.error("Silence detection failed", err);
+        alert("Connection error executing silence detection.");
+      }
     } finally {
       setIsDetectingSilence(false);
+      silenceDetectionAbortControllerRef.current = null;
     }
   };
 
@@ -1791,10 +2036,23 @@ export default function VideoEditorWorkspace() {
   const activeTextOverlays = activeProject?.timeline.tracks.text.filter(
     (t) => currentTime >= t.start && currentTime < t.start + t.duration
   ) || [];
-
   const activeImageOverlays = activeProject?.timeline.tracks.image.filter(
     (img) => currentTime >= img.start && currentTime < img.start + img.duration
   ) || [];
+
+  // Calculate max timeline duration and scrolling container width
+  const maxTimelineDuration = activeProject
+    ? Math.max(
+        30,
+        activeProject.timeline.tracks.video.reduce((max, item) => Math.max(max, item.start + item.duration), 0),
+        activeProject.timeline.tracks.audio.reduce((max, item) => Math.max(max, item.start + item.duration), 0),
+        activeProject.timeline.tracks.subtitle.reduce((max, item) => Math.max(max, item.start + item.duration), 0),
+        activeProject.timeline.tracks.text.reduce((max, item) => Math.max(max, item.start + item.duration), 0),
+        activeProject.timeline.tracks.image.reduce((max, item) => Math.max(max, item.start + item.duration), 0)
+      )
+    : 30;
+
+  const timelineWidthPx = maxTimelineDuration * zoomLevel + 200;
 
   return (
     <div className="flex flex-col h-full bg-[#0b0b0f] text-[#f4f4f6]">
@@ -1906,10 +2164,28 @@ export default function VideoEditorWorkspace() {
                 {Object.values(activeDownloads).map((task) => (
                   <div key={task.id} className="text-[11px] bg-[#1a1a24] p-2 rounded border border-[#22222f]">
                     <div className="flex justify-between items-center mb-1">
-                      <span className="truncate max-w-[180px] text-gray-400 font-mono">{task.url}</span>
-                      <span className="font-semibold text-indigo-400 uppercase text-[9px] tracking-wider">
-                        {task.status}
-                      </span>
+                      <span className="truncate max-w-[150px] text-gray-400 font-mono">{task.url}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-indigo-400 uppercase text-[9px] tracking-wider">
+                          {task.status}
+                        </span>
+                        {(task.status === "pending" || task.status === "downloading" || task.status === "processing") && (
+                          <button
+                            onClick={() => handleCancelDownload(task.id)}
+                            className="text-[9px] bg-red-950/40 border border-red-900 text-red-400 px-1 rounded hover:bg-red-900 hover:text-white transition-all cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        )}
+                        {(task.status === "failed" || task.status === "cancelled") && (
+                          <button
+                            onClick={() => handleRetryDownload(task)}
+                            className="text-[9px] bg-emerald-950/40 border border-emerald-900 text-emerald-400 px-1 rounded hover:bg-emerald-900 hover:text-white transition-all cursor-pointer"
+                          >
+                            Retry
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {task.status === "downloading" || task.status === "processing" ? (
                       <div className="w-full bg-[#2a2a38] h-1.5 rounded-full overflow-hidden">
@@ -1925,6 +2201,10 @@ export default function VideoEditorWorkspace() {
                     ) : task.status === "failed" ? (
                       <div className="text-red-400 flex items-center gap-1 mt-0.5" title={task.error}>
                         <AlertCircle className="w-3.5 h-3.5" /> Download Failed
+                      </div>
+                    ) : task.status === "cancelled" ? (
+                      <div className="text-gray-400 flex items-center gap-1 mt-0.5">
+                        <AlertCircle className="w-3.5 h-3.5 text-gray-500" /> Download Cancelled
                       </div>
                     ) : null}
                   </div>
@@ -2538,23 +2818,33 @@ export default function VideoEditorWorkspace() {
                   {selectedAsset && selectedAsset.type === "video" ? (
                     <div className="flex flex-col gap-2">
                       <p className="text-[11px] text-gray-500">Generate auto-captions locally with OpenAI Whisper.</p>
-                      <button
-                        onClick={handleTranscribeAssetWrapper}
-                        disabled={isTranscribing}
-                        className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
-                      >
-                        {isTranscribing ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>Transcribing...</span>
-                          </>
-                        ) : (
-                          <>
-                            <RefreshCw className="w-3.5 h-3.5" />
-                            <span>Run Local Auto-Subtitles</span>
-                          </>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleTranscribeAssetWrapper}
+                          disabled={isTranscribing}
+                          className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                        >
+                          {isTranscribing ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Transcribing...</span>
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>Run Local Auto-Subtitles</span>
+                            </>
+                          )}
+                        </button>
+                        {isTranscribing && (
+                          <button
+                            onClick={handleCancelTranscribe}
+                            className="px-3 py-1.5 bg-red-600/25 border border-red-500/50 hover:bg-red-600/50 text-red-300 rounded text-xs font-bold transition-all cursor-pointer"
+                          >
+                            Cancel
+                          </button>
                         )}
-                      </button>
+                      </div>
                     </div>
                   ) : (
                     <p className="text-[11px] text-gray-500 italic">Select a video to run transcription.</p>
@@ -2593,23 +2883,33 @@ export default function VideoEditorWorkspace() {
                         </div>
                       </div>
 
-                      <button
-                        onClick={handleDetectSilence}
-                        disabled={isDetectingSilence}
-                        className="w-full py-1 bg-[#1b1b28] hover:bg-[#252538] border border-[#222238] text-indigo-300 rounded text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
-                      >
-                        {isDetectingSilence ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            <span>Analyzing...</span>
-                          </>
-                        ) : (
-                          <>
-                            <VolumeX className="w-3 h-3" />
-                            <span>Scan for Silence</span>
-                          </>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleDetectSilence}
+                          disabled={isDetectingSilence}
+                          className="flex-1 py-1 bg-[#1b1b28] hover:bg-[#252538] border border-[#222238] text-indigo-300 rounded text-[11px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                        >
+                          {isDetectingSilence ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              <span>Analyzing...</span>
+                            </>
+                          ) : (
+                            <>
+                              <VolumeX className="w-3 h-3" />
+                              <span>Scan for Silence</span>
+                            </>
+                          )}
+                        </button>
+                        {isDetectingSilence && (
+                          <button
+                            onClick={handleCancelSilenceDetection}
+                            className="px-3 py-1 bg-red-600/25 border border-red-500/50 hover:bg-red-600/50 text-red-300 rounded text-[11px] font-bold transition-all cursor-pointer"
+                          >
+                            Cancel
+                          </button>
                         )}
-                      </button>
+                      </div>
 
                       {detectedSilences.length > 0 && (
                         <div className="flex flex-col gap-1.5 mt-1 border-t border-[#22222f]/60 pt-2">
@@ -2777,10 +3077,59 @@ export default function VideoEditorWorkspace() {
                       onChange={(e) => setAiProvider(e.target.value)}
                       className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-3 py-2 rounded-lg outline-none cursor-pointer"
                     >
-                      <option value="openai" disabled={!apiKeysStatus.openai}>OpenAI (gpt-4o-mini)</option>
-                      <option value="anthropic" disabled={!apiKeysStatus.anthropic}>Claude (claude-3-5-haiku)</option>
-                      <option value="gemini" disabled={!apiKeysStatus.gemini}>Google Gemini (1.5-flash)</option>
+                      <option value="openai" disabled={!apiKeysStatus.openai}>OpenAI</option>
+                      <option value="anthropic" disabled={!apiKeysStatus.anthropic}>Anthropic Claude</option>
+                      <option value="gemini" disabled={!apiKeysStatus.gemini}>Google Gemini</option>
                     </select>
+                  </div>
+
+                  {/* Select LLM model from provider list */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-gray-500 font-bold uppercase">LLM Model Selector</span>
+                      <button
+                        onClick={() => fetchAvailableModels(aiProvider, true)}
+                        disabled={isLoadingModels}
+                        className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 cursor-pointer disabled:opacity-40"
+                        title="Force refresh model list from provider API"
+                      >
+                        {isLoadingModels ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <RefreshCw className="w-2.5 h-2.5" />}
+                        Refresh List
+                      </button>
+                    </div>
+                    {isLoadingModels ? (
+                      <div className="bg-[#1c1c28] border border-[#22222f] text-xs text-gray-500 px-3 py-2 rounded-lg flex items-center gap-2">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+                        <span>Loading models...</span>
+                      </div>
+                    ) : (
+                      <select
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                        className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-3 py-2 rounded-lg outline-none cursor-pointer"
+                      >
+                        {availableModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name || m.id}
+                          </option>
+                        ))}
+                        {availableModels.length === 0 && (
+                          <option value="">No models available</option>
+                        )}
+                      </select>
+                    )}
+                    {/* Model details metadata display */}
+                    {!isLoadingModels && selectedModel && (() => {
+                      const modelObj = availableModels.find((m) => m.id === selectedModel);
+                      if (!modelObj) return null;
+                      return (
+                        <div className="bg-[#13131e]/50 border border-[#22223c]/40 p-2 rounded text-[10px] text-gray-400 flex flex-col gap-0.5 font-mono">
+                          <div><span className="text-gray-500">ID:</span> {modelObj.id}</div>
+                          <div><span className="text-gray-500">Context Window:</span> {modelObj.context_window?.toLocaleString() || "unknown"} tokens</div>
+                          {modelObj.provider && <div><span className="text-gray-500">Provider:</span> {modelObj.provider}</div>}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Actions buttons */}
@@ -3317,6 +3666,56 @@ export default function VideoEditorWorkspace() {
           </div>
 
           {activeProject && (
+            <div className="flex items-center space-x-1 bg-[#171725] px-2 py-0.5 rounded-lg border border-[#222235]">
+              <button
+                onClick={async () => {
+                  if (selectedItem && (selectedItem.type === "video" || selectedItem.type === "audio")) {
+                    await handleSplitTimelineItem(selectedItem.type, selectedItem.id);
+                  }
+                }}
+                disabled={!selectedItem || (selectedItem.type !== "video" && selectedItem.type !== "audio")}
+                className="p-1 hover:text-indigo-400 disabled:opacity-40 disabled:hover:text-gray-500 text-gray-400 rounded transition-all cursor-pointer"
+                title="Split Selected Clip at Playhead (Cut)"
+              >
+                <Scissors className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={async () => {
+                  if (selectedItem) {
+                    await handleRemoveTimelineItemWrapper(selectedItem.type, selectedItem.id);
+                    setSelectedItem(null);
+                  }
+                }}
+                disabled={!selectedItem}
+                className="p-1 hover:text-red-400 disabled:opacity-40 disabled:hover:text-gray-500 text-gray-400 rounded transition-all cursor-pointer"
+                title="Delete Selected Clip"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleToggleMuteSelected}
+                disabled={!selectedItem || selectedItem.type !== "video"}
+                className={`p-1 disabled:opacity-40 disabled:hover:text-gray-500 rounded transition-all cursor-pointer ${
+                  selectedItem && selectedItem.type === "video" && activeProject.timeline.tracks.video.find(v => v.id === selectedItem.id)?.muted
+                    ? "text-yellow-500 hover:text-yellow-400"
+                    : "text-gray-400 hover:text-yellow-400"
+                }`}
+                title="Mute/Unmute Selected Video Clip"
+              >
+                <VolumeX className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleDuplicateSelected}
+                disabled={!selectedItem}
+                className="p-1 hover:text-emerald-400 disabled:opacity-40 disabled:hover:text-gray-500 text-gray-400 rounded transition-all cursor-pointer"
+                title="Duplicate Selected Clip"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {activeProject && (
             <div className="flex items-center space-x-2">
               <select
                 value={exportAspectRatio}
@@ -3350,10 +3749,47 @@ export default function VideoEditorWorkspace() {
         </div>
 
         {/* Timeline Tracks container */}
-        <div ref={timelineContainerRef} className="flex-1 overflow-x-auto overflow-y-auto p-4 flex flex-col gap-2">
+        <div 
+          ref={timelineContainerRef} 
+          onClick={() => setSelectedItem(null)}
+          onWheel={(e) => {
+            if (timelineContainerRef.current) {
+              if (e.deltaX !== 0) {
+                timelineContainerRef.current.scrollLeft += e.deltaX;
+              } else if (e.shiftKey && e.deltaY !== 0) {
+                timelineContainerRef.current.scrollLeft += e.deltaY;
+              }
+            }
+          }}
+          className="flex-1 overflow-x-auto overflow-y-auto py-4 px-2 flex flex-col gap-2"
+        >
+          {/* Ruler Row */}
+          {activeProject && (
+            <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+              <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20 text-[9px] text-gray-500 uppercase font-bold">
+                <span>Ruler</span>
+              </div>
+              <div 
+                className="flex-1 h-6 bg-[#161622]/50 border border-[#222238]/40 rounded relative cursor-ew-resize select-none overflow-hidden"
+                onPointerDown={handleRulerPointerDown}
+              >
+                {/* Tick marks */}
+                {renderRulerTicks()}
+                
+                {/* Playhead thumb indicator */}
+                <div
+                  style={{ left: `${currentTime * zoomLevel}px` }}
+                  className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
+                >
+                  <div className="w-2.5 h-2.5 bg-yellow-500 -ml-1 rounded-full border border-black shadow"></div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Video Track */}
-          <div className="flex items-center gap-3 min-w-[800px]">
-            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2">
+          <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20">
               <Film className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Video</span>
             </div>
@@ -3361,53 +3797,72 @@ export default function VideoEditorWorkspace() {
               {activeProject && activeProject.timeline.tracks.video.length === 0 && (
                 <span className="text-[10px] text-gray-600 italic px-2">Timeline video track is empty</span>
               )}
-              {activeProject?.timeline.tracks.video.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    left: `${item.start * zoomLevel}px`,
-                    width: `${item.duration * zoomLevel}px`
-                  }}
-                  className="absolute h-9 bg-indigo-900/40 hover:bg-indigo-950/60 border border-indigo-500 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer group"
-                >
-                  <span className="truncate font-semibold max-w-[80%]">{item.name}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSplitTimelineItem("video", item.id);
-                      }}
-                      className="text-indigo-400 hover:text-indigo-300 p-0.5 rounded hover:bg-[#12121a]"
-                      title="Split clip at playhead"
-                    >
-                      <Scissors className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveTimelineItemWrapper("video", item.id);
-                      }}
-                      className="text-red-400 hover:text-red-300 p-0.5 rounded hover:bg-[#12121a]"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+              {activeProject?.timeline.tracks.video.map((item) => {
+                const isSelected = selectedItem?.id === item.id && selectedItem?.type === "video";
+                return (
+                  <div
+                    key={item.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedItem({ id: item.id, type: "video" });
+                    }}
+                    style={{
+                      left: `${item.start * zoomLevel}px`,
+                      width: `${item.duration * zoomLevel}px`
+                    }}
+                    className={`absolute h-9 bg-indigo-900/40 hover:bg-indigo-950/60 border ${
+                      isSelected ? "border-yellow-400 ring-2 ring-yellow-400/50 z-10 text-white" : "border-indigo-500 text-gray-300"
+                    } rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer group`}
+                  >
+                    <span className="truncate font-semibold max-w-[80%]">
+                      {item.muted ? "🔇 " : ""}{item.name}
+                    </span>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleMuteItem("video", item.id);
+                        }}
+                        className={`p-0.5 rounded hover:bg-[#12121a] ${item.muted ? "text-yellow-500" : "text-gray-400 hover:text-yellow-400"}`}
+                        title={item.muted ? "Unmute Video" : "Mute Video"}
+                      >
+                        <VolumeX className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSplitTimelineItem("video", item.id);
+                        }}
+                        className="text-indigo-400 hover:text-indigo-300 p-0.5 rounded hover:bg-[#12121a]"
+                        title="Split clip at playhead"
+                      >
+                        <Scissors className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveTimelineItemWrapper("video", item.id);
+                        }}
+                        className="text-red-400 hover:text-red-300 p-0.5 rounded hover:bg-[#12121a]"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {/* Playhead visualization */}
               <div
                 style={{ left: `${currentTime * zoomLevel}px` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
-              >
-                <div className="w-2.5 h-2.5 bg-yellow-500 -ml-1 rounded-full border border-black shadow"></div>
-              </div>
+              ></div>
             </div>
           </div>
 
           {/* Audio Track */}
-          <div className="flex items-center gap-3 min-w-[800px]">
-            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2">
+          <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20">
               <Music className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Audio</span>
             </div>
@@ -3415,39 +3870,48 @@ export default function VideoEditorWorkspace() {
               {activeProject && activeProject.timeline.tracks.audio.length === 0 && (
                 <span className="text-[10px] text-gray-600 italic px-2">Timeline audio track is empty</span>
               )}
-              {activeProject?.timeline.tracks.audio.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    left: `${item.start * zoomLevel}px`,
-                    width: `${item.duration * zoomLevel}px`
-                  }}
-                  className="absolute h-9 bg-emerald-950/40 hover:bg-emerald-950/60 border border-emerald-500 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer group"
-                >
-                  <span className="truncate font-semibold max-w-[80%] text-emerald-300">{item.name}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleSplitTimelineItem("audio", item.id);
-                      }}
-                      className="text-emerald-400 hover:text-emerald-300 p-0.5 rounded hover:bg-[#12121a]"
-                      title="Split audio at playhead"
-                    >
-                      <Scissors className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveTimelineItemWrapper("audio", item.id);
-                      }}
-                      className="text-red-400 hover:text-red-300 p-0.5 rounded hover:bg-[#12121a]"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+              {activeProject?.timeline.tracks.audio.map((item) => {
+                const isSelected = selectedItem?.id === item.id && selectedItem?.type === "audio";
+                return (
+                  <div
+                    key={item.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedItem({ id: item.id, type: "audio" });
+                    }}
+                    style={{
+                      left: `${item.start * zoomLevel}px`,
+                      width: `${item.duration * zoomLevel}px`
+                    }}
+                    className={`absolute h-9 bg-emerald-950/40 hover:bg-emerald-950/60 border ${
+                      isSelected ? "border-yellow-400 ring-2 ring-yellow-400/50 z-10 text-white" : "border-emerald-500 text-emerald-300"
+                    } rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer group`}
+                  >
+                    <span className="truncate font-semibold max-w-[80%]">{item.name}</span>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSplitTimelineItem("audio", item.id);
+                        }}
+                        className="text-emerald-400 hover:text-emerald-300 p-0.5 rounded hover:bg-[#12121a]"
+                        title="Split audio at playhead"
+                      >
+                        <Scissors className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveTimelineItemWrapper("audio", item.id);
+                        }}
+                        className="text-red-400 hover:text-red-300 p-0.5 rounded hover:bg-[#12121a]"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               <div
                 style={{ left: `${currentTime * zoomLevel}px` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
@@ -3456,8 +3920,8 @@ export default function VideoEditorWorkspace() {
           </div>
 
           {/* Subtitle Track */}
-          <div className="flex items-center gap-3 min-w-[800px]">
-            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2">
+          <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20">
               <FileText className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Subtitles</span>
             </div>
@@ -3465,32 +3929,40 @@ export default function VideoEditorWorkspace() {
               {activeProject && activeProject.timeline.tracks.subtitle.length === 0 && (
                 <span className="text-[10px] text-gray-600 italic px-2">Subtitle track is empty</span>
               )}
-              {activeProject?.timeline.tracks.subtitle.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    left: `${item.start * zoomLevel}px`,
-                    width: `${item.duration * zoomLevel}px`
-                  }}
-                  onClick={() => setSelectedSubtitleId(item.id)}
-                  className={`absolute h-9 rounded px-2 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
-                    selectedSubtitleId === item.id
-                      ? "bg-indigo-900/60 border-indigo-400 text-white"
-                      : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
-                  }`}
-                >
-                  <span className="truncate font-semibold max-w-[85%]">{item.text}</span>
-                  <button
+              {activeProject?.timeline.tracks.subtitle.map((item) => {
+                const isSelected = selectedItem?.id === item.id && selectedItem?.type === "subtitle";
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      left: `${item.start * zoomLevel}px`,
+                      width: `${item.duration * zoomLevel}px`
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleRemoveTimelineItemWrapper("subtitle", item.id);
+                      setSelectedSubtitleId(item.id);
+                      setSelectedItem({ id: item.id, type: "subtitle" });
                     }}
-                    className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded"
+                    className={`absolute h-9 rounded px-2 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
+                      isSelected || selectedSubtitleId === item.id
+                        ? "bg-indigo-900/60 border-yellow-400 ring-2 ring-yellow-400/50 z-10 text-white"
+                        : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
+                    }`}
                   >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+                    <span className="truncate font-semibold max-w-[85%]">{item.text}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRemoveTimelineItemWrapper("subtitle", item.id);
+                        if (selectedItem?.id === item.id) setSelectedItem(null);
+                      }}
+                      className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
               <div
                 style={{ left: `${currentTime * zoomLevel}px` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
@@ -3499,8 +3971,8 @@ export default function VideoEditorWorkspace() {
           </div>
 
           {/* TEXT Overlay Track (Phase 7) */}
-          <div className="flex items-center gap-3 min-w-[800px]">
-            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2">
+          <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20">
               <Type className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Text Track</span>
             </div>
@@ -3508,37 +3980,43 @@ export default function VideoEditorWorkspace() {
               {activeProject && activeProject.timeline.tracks.text.length === 0 && (
                 <span className="text-[10px] text-gray-600 italic px-2">Click "Add Text Layer" in tools</span>
               )}
-              {activeProject?.timeline.tracks.text.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    left: `${item.start * zoomLevel}px`,
-                    width: `${item.duration * zoomLevel}px`
-                  }}
-                  onClick={() => {
-                    setSelectedTextId(item.id);
-                    setSelectedImageId(null);
-                  }}
-                  className={`absolute h-9 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
-                    selectedTextId === item.id
-                      ? "bg-indigo-900/60 border-indigo-400 text-white"
-                      : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
-                  }`}
-                >
-                  <span className="truncate font-semibold max-w-[80%]">{item.text}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveTimelineItemWrapper("text", item.id);
-                      }}
-                      className="text-red-400 hover:text-red-300 p-0.5 rounded"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+              {activeProject?.timeline.tracks.text.map((item) => {
+                const isSelected = selectedItem?.id === item.id && selectedItem?.type === "text";
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      left: `${item.start * zoomLevel}px`,
+                      width: `${item.duration * zoomLevel}px`
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedTextId(item.id);
+                      setSelectedImageId(null);
+                      setSelectedItem({ id: item.id, type: "text" });
+                    }}
+                    className={`absolute h-9 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
+                      isSelected || selectedTextId === item.id
+                        ? "bg-indigo-900/60 border-yellow-400 ring-2 ring-yellow-400/50 z-10 text-white"
+                        : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
+                    }`}
+                  >
+                    <span className="truncate font-semibold max-w-[80%]">{item.text}</span>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveTimelineItemWrapper("text", item.id);
+                          if (selectedItem?.id === item.id) setSelectedItem(null);
+                        }}
+                        className="text-red-400 hover:text-red-300 p-0.5 rounded"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               <div
                 style={{ left: `${currentTime * zoomLevel}px` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
@@ -3547,8 +4025,8 @@ export default function VideoEditorWorkspace() {
           </div>
 
           {/* IMAGE Overlay Track (Phase 7) */}
-          <div className="flex items-center gap-3 min-w-[800px]">
-            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2">
+          <div className="flex items-center gap-3" style={{ width: `${timelineWidthPx}px` }}>
+            <div className="w-24 flex items-center gap-1.5 shrink-0 select-none border-r border-[#22222f] pr-2 pl-2 sticky left-0 bg-[#12121a] z-20">
               <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Image Track</span>
             </div>
@@ -3556,37 +4034,43 @@ export default function VideoEditorWorkspace() {
               {activeProject && activeProject.timeline.tracks.image.length === 0 && (
                 <span className="text-[10px] text-gray-600 italic px-2">Import an image and add to timeline</span>
               )}
-              {activeProject?.timeline.tracks.image.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    left: `${item.start * zoomLevel}px`,
-                    width: `${item.duration * zoomLevel}px`
-                  }}
-                  onClick={() => {
-                    setSelectedImageId(item.id);
-                    setSelectedTextId(null);
-                  }}
-                  className={`absolute h-9 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
-                    selectedImageId === item.id
-                      ? "bg-indigo-900/60 border-indigo-400 text-white"
-                      : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
-                  }`}
-                >
-                  <span className="truncate font-semibold max-w-[80%]">{item.name}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveTimelineItemWrapper("image", item.id);
-                      }}
-                      className="text-red-400 hover:text-red-300 p-0.5 rounded"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+              {activeProject?.timeline.tracks.image.map((item) => {
+                const isSelected = selectedItem?.id === item.id && selectedItem?.type === "image";
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      left: `${item.start * zoomLevel}px`,
+                      width: `${item.duration * zoomLevel}px`
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedImageId(item.id);
+                      setSelectedTextId(null);
+                      setSelectedItem({ id: item.id, type: "image" });
+                    }}
+                    className={`absolute h-9 rounded px-2.5 flex items-center justify-between text-[10px] overflow-hidden select-none cursor-pointer border group ${
+                      isSelected || selectedImageId === item.id
+                        ? "bg-indigo-900/60 border-yellow-400 ring-2 ring-yellow-400/50 z-10 text-white"
+                        : "bg-[#181824] border-[#222238] text-gray-400 hover:border-gray-500"
+                    }`}
+                  >
+                    <span className="truncate font-semibold max-w-[80%]">{item.name}</span>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveTimelineItemWrapper("image", item.id);
+                          if (selectedItem?.id === item.id) setSelectedItem(null);
+                        }}
+                        className="text-red-400 hover:text-red-300 p-0.5 rounded"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               <div
                 style={{ left: `${currentTime * zoomLevel}px` }}
                 className="absolute top-0 bottom-0 w-0.5 bg-yellow-500 pointer-events-none z-10"
@@ -3727,9 +4211,7 @@ export default function VideoEditorWorkspace() {
               </h3>
               <button
                 onClick={() => {
-                  if (activeRender.status === "completed" || activeRender.status === "failed") {
-                    setShowRenderModal(false);
-                  }
+                  setShowRenderModal(false);
                 }}
                 disabled={activeRender.status === "rendering" || activeRender.status === "pending"}
                 className="text-xs text-gray-500 hover:text-white disabled:opacity-30 cursor-pointer"
@@ -3789,7 +4271,27 @@ export default function VideoEditorWorkspace() {
                   </p>
                 </div>
               )}
+
+              {activeRender.status === "cancelled" && (
+                <div className="bg-gray-950/30 border border-gray-500/40 p-4 rounded-lg flex flex-col gap-1.5 text-xs text-gray-400">
+                  <div className="flex items-center gap-2 text-gray-400 font-bold">
+                    <AlertCircle className="w-4 h-4" /> Export Cancelled
+                  </div>
+                  <p>The rendering process was cancelled by the user.</p>
+                </div>
+              )}
             </div>
+
+            {(activeRender.status === "rendering" || activeRender.status === "pending") && (
+              <button
+                onClick={async () => {
+                  await handleCancelRender();
+                }}
+                className="w-full py-2 bg-red-600/25 border border-red-500/50 hover:bg-red-600/50 text-red-300 rounded font-bold transition-all shadow-md active:scale-95 text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                Cancel Export / Render
+              </button>
+            )}
 
             {activeRender.status === "rendering" && (
               <div className="flex items-center gap-2 text-[10px] text-gray-500 italic justify-center">

@@ -36,3 +36,10 @@ def check_render_status(task_id: str):
             detail=f"Render task {task_id} not found"
         )
     return task
+
+@router.post("/render/{task_id}/cancel")
+def cancel_timeline_render(task_id: str):
+    """Cancels a background timeline render task."""
+    from backend.app.utils.render import cancel_render_task
+    success = cancel_render_task(task_id)
+    return {"taskId": task_id, "status": "cancelled", "success": success}
