@@ -166,6 +166,7 @@ interface AIKeyStatus {
   openai: boolean;
   anthropic: boolean;
   gemini: boolean;
+  elevenlabs: boolean;
 }
 
 interface AIMetadata {
@@ -228,11 +229,12 @@ export default function VideoEditorWorkspace() {
   const [subtitleStyle, setSubtitleStyle] = useState<"tiktok" | "shorts" | "minimal">("tiktok");
 
   // AI Panel & API Keys state (Phase 7)
-  const [apiKeysStatus, setApiKeysStatus] = useState<AIKeyStatus>({ openai: false, anthropic: false, gemini: false });
+  const [apiKeysStatus, setApiKeysStatus] = useState<AIKeyStatus>({ openai: false, anthropic: false, gemini: false, elevenlabs: false });
   const [showKeysModal, setShowKeysModal] = useState(false);
   const [openaiKeyInput, setOpenaiKeyInput] = useState("");
   const [anthropicKeyInput, setAnthropicKeyInput] = useState("");
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
+  const [elevenlabsKeyInput, setElevenlabsKeyInput] = useState("");
   const [aiProvider, setAiProvider] = useState("openai");
   const [isGeneratingMetadata, setIsGeneratingMetadata] = useState(false);
   const [aiMetadata, setAiMetadata] = useState<AIMetadata | null>(null);
@@ -244,6 +246,22 @@ export default function VideoEditorWorkspace() {
   const [isDetectingSilence, setIsDetectingSilence] = useState(false);
   const [noiseThreshold, setNoiseThreshold] = useState(-30.0);
   const [minSilenceDuration, setMinSilenceDuration] = useState(0.5);
+
+  // Narration Studio state
+  const [narrationInputMode, setNarrationInputMode] = useState<"topic" | "notes" | "raw">("topic");
+  const [narrationInputValue, setNarrationInputValue] = useState("");
+  const [generatedScript, setGeneratedScript] = useState("");
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [ttsProvider, setTtsProvider] = useState<"openai" | "elevenlabs">("openai");
+  const [ttsVoice, setTtsVoice] = useState("alloy");
+  const [ttsSpeed, setTtsSpeed] = useState(1.0);
+  const [ttsModel, setTtsModel] = useState("tts-1");
+  const [isGeneratingVoiceover, setIsGeneratingVoiceover] = useState(false);
+  const [ttsVoiceoverAsset, setTtsVoiceoverAsset] = useState<Asset | null>(null);
+  const [generatedSubtitles, setGeneratedSubtitles] = useState<SubtitleTrackItem[]>([]);
+  const [isGeneratingSubtitles, setIsGeneratingSubtitles] = useState(false);
+  const [isGeneratingNarrationMetadata, setIsGeneratingNarrationMetadata] = useState(false);
+  const [narrationMetadata, setNarrationMetadata] = useState<AIMetadata | null>(null);
 
   // Text / Image Overlay Editor state (Phase 7)
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
@@ -265,7 +283,7 @@ export default function VideoEditorWorkspace() {
   const [imgHeight, setImgHeight] = useState(0.3);
   
   // Visual workspace state
-  const [activeTab, setActiveTab] = useState<"assets" | "subtitles" | "ai" | "settings">("assets");
+  const [activeTab, setActiveTab] = useState<"assets" | "subtitles" | "ai" | "settings" | "narration">("assets");
   const [zoomLevel, setZoomLevel] = useState(20);
   
   // Trimming tool state (Feature 3)
@@ -704,7 +722,8 @@ export default function VideoEditorWorkspace() {
         body: JSON.stringify({
           openai: openaiKeyInput,
           anthropic: anthropicKeyInput,
-          gemini: geminiKeyInput
+          gemini: geminiKeyInput,
+          elevenlabs: elevenlabsKeyInput
         })
       });
       if (res.ok) {
@@ -1372,6 +1391,211 @@ export default function VideoEditorWorkspace() {
     alert(`Successfully removed silences: split clip into ${newItems.length} segments.`);
   };
 
+  // --- AI Narration Studio Handlers ---
+
+  // Step 3 & 4: Script Generator
+  const handleGenerateScript = async (modifier?: string) => {
+    if (!activeProject) return;
+    
+    // Check key configured
+    if (aiProvider === "openai" && !apiKeysStatus.openai) {
+      alert("OpenAI API key is not configured. Go to API Keys Settings to add it.");
+      return;
+    }
+    if (aiProvider === "anthropic" && !apiKeysStatus.anthropic) {
+      alert("Claude API key is not configured. Go to API Keys Settings to add it.");
+      return;
+    }
+    if (aiProvider === "gemini" && !apiKeysStatus.gemini) {
+      alert("Gemini API key is not configured. Go to API Keys Settings to add it.");
+      return;
+    }
+
+    setIsGeneratingScript(true);
+    try {
+      const isRewrite = !!modifier;
+      const val = isRewrite ? generatedScript : narrationInputValue;
+      
+      const res = await fetch(`${API_BASE}/api/narration/generate-script`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: activeProject.id,
+          provider: aiProvider,
+          mode: narrationInputMode,
+          inputValue: val,
+          modifier: modifier || null
+        })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setGeneratedScript(data.script);
+      } else {
+        const err = await res.json();
+        alert(`Script generation failed: ${err.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to connect to script generation service.");
+    } finally {
+      setIsGeneratingScript(false);
+    }
+  };
+
+  // Step 5: Text-To-Speech Voiceover
+  const handleGenerateVoiceover = async () => {
+    if (!activeProject || !generatedScript.trim()) return;
+    
+    if (ttsProvider === "openai" && !apiKeysStatus.openai) {
+      alert("OpenAI API key is not configured for TTS.");
+      return;
+    }
+    if (ttsProvider === "elevenlabs" && !apiKeysStatus.elevenlabs) {
+      alert("ElevenLabs API key is not configured for TTS.");
+      return;
+    }
+
+    setIsGeneratingVoiceover(true);
+    setTtsVoiceoverAsset(null);
+    setGeneratedSubtitles([]);
+    try {
+      const res = await fetch(`${API_BASE}/api/narration/generate-voiceover`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: activeProject.id,
+          script: generatedScript,
+          provider: ttsProvider,
+          voice: ttsVoice,
+          speed: ttsSpeed,
+          model: ttsProvider === "openai" ? ttsModel : "eleven_monolingual_v1"
+        })
+      });
+
+      if (res.ok) {
+        const newAsset = await res.json();
+        setTtsVoiceoverAsset(newAsset);
+        // Refresh project details in list
+        await loadProjectDetails(activeProject.id);
+        
+        // Auto trigger subtitle generation (Step 6)
+        await handleGenerateNarrationSubtitles(newAsset);
+      } else {
+        const err = await res.json();
+        alert(`Voiceover generation failed: ${err.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to connect to TTS voiceover service.");
+    } finally {
+      setIsGeneratingVoiceover(false);
+    }
+  };
+
+  // Step 6: Subtitle Generation (Whisper alignment)
+  const handleGenerateNarrationSubtitles = async (audioAsset: Asset) => {
+    if (!activeProject) return;
+    setIsGeneratingSubtitles(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/narration/generate-subtitles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: activeProject.id,
+          audioAssetId: audioAsset.id,
+          script: generatedScript
+        })
+      });
+      if (res.ok) {
+        const subs = await res.json();
+        setGeneratedSubtitles(subs);
+      } else {
+        const err = await res.json();
+        alert(`Subtitle generation warning: ${err.detail || "Failed to auto-align subtitles."}`);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsGeneratingSubtitles(false);
+    }
+  };
+
+  // Step 7: Timeline Insertion
+  const handleInsertNarrationToTimeline = async () => {
+    if (!activeProject || !ttsVoiceoverAsset) return;
+
+    const updatedProject = { ...activeProject };
+    
+    // 1. Insert voiceover into Audio track
+    const lastAudioEnd = updatedProject.timeline.tracks.audio.reduce(
+      (max, item) => Math.max(max, item.start + item.duration),
+      0
+    );
+    const audioItemId = Math.random().toString(36).substring(2, 9);
+    const newAudioItem: AudioTrackItem = {
+      id: audioItemId,
+      assetId: ttsVoiceoverAsset.id,
+      name: ttsVoiceoverAsset.name,
+      start: lastAudioEnd,
+      duration: ttsVoiceoverAsset.duration || 5.0,
+      sourceStart: 0.0,
+      volume: 1.0
+    };
+    updatedProject.timeline.tracks.audio.push(newAudioItem);
+
+    // 2. Insert subtitle items into Subtitle track (shifted by lastAudioEnd)
+    if (generatedSubtitles.length > 0) {
+      const newSubs = generatedSubtitles.map((sub) => ({
+        ...sub,
+        id: Math.random().toString(36).substring(2, 9),
+        start: lastAudioEnd + sub.start
+      }));
+      updatedProject.timeline.tracks.subtitle = [
+        ...updatedProject.timeline.tracks.subtitle,
+        ...newSubs
+      ];
+    }
+
+    await updateProjectState(updatedProject);
+    alert("Voiceover track and synced captions successfully inserted into your timeline.");
+    
+    // Clear script narration panel workspace
+    setTtsVoiceoverAsset(null);
+    setGeneratedSubtitles([]);
+  };
+
+  // Step 8: YouTube Metadata Generator
+  const handleGenerateNarrationMetadata = async () => {
+    if (!activeProject || !generatedScript.trim()) return;
+
+    setIsGeneratingNarrationMetadata(true);
+    setNarrationMetadata(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/narration/generate-metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: activeProject.id,
+          script: generatedScript,
+          provider: aiProvider
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNarrationMetadata(data);
+      } else {
+        const err = await res.json();
+        alert(`YouTube metadata generation failed: ${err.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to connect to AI metadata service.");
+    } finally {
+      setIsGeneratingNarrationMetadata(false);
+    }
+  };
+
   // Subtitle Editing updates
   const handleUpdateSubtitleText = async (subId: string, newText: string) => {
     if (!activeProject) return;
@@ -1596,6 +1820,7 @@ export default function VideoEditorWorkspace() {
               setOpenaiKeyInput("");
               setAnthropicKeyInput("");
               setGeminiKeyInput("");
+              setElevenlabsKeyInput("");
               setShowKeysModal(true);
             }}
             className="flex items-center space-x-1 px-3 py-1.5 bg-[#181824] hover:bg-[#252535] border border-[#222238] rounded-lg text-xs text-indigo-300 font-semibold cursor-pointer shadow active:scale-95"
@@ -1999,6 +2224,14 @@ export default function VideoEditorWorkspace() {
                 }`}
               >
                 AI Panel
+              </button>
+              <button
+                onClick={() => setActiveTab("narration")}
+                className={`flex-1 text-center py-2.5 px-2 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                  activeTab === "narration" ? "border-indigo-500 text-[#f4f4f6]" : "border-transparent text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Narration
               </button>
             </div>
 
@@ -2652,6 +2885,413 @@ export default function VideoEditorWorkspace() {
                   )}
                 </div>
               )}
+
+              {activeTab === "narration" && (() => {
+                const wordsCount = generatedScript.trim() ? generatedScript.trim().split(/\s+/).length : 0;
+                const baseDuration = (wordsCount / 150) * 60;
+                const estDuration = baseDuration / ttsSpeed;
+
+                const videoDuration = activeProject
+                  ? activeProject.timeline.tracks.video.reduce((max, item) => Math.max(max, item.start + item.duration), 0)
+                  : 0;
+
+                const durationDiff = Math.abs(estDuration - videoDuration);
+
+                let matchStatus = "Perfect";
+                let matchStatusColor = "text-green-400 border-green-500/30 bg-green-500/5";
+                if (wordsCount === 0) {
+                  matchStatus = "No Script";
+                  matchStatusColor = "text-gray-400 border-gray-700 bg-gray-900/20";
+                } else if (durationDiff <= 1.0) {
+                  matchStatus = "Perfect";
+                  matchStatusColor = "text-green-400 border-green-500/30 bg-green-500/5";
+                } else if (durationDiff <= 3.0) {
+                  matchStatus = "Good";
+                  matchStatusColor = "text-indigo-400 border-indigo-500/30 bg-indigo-500/5";
+                } else if (durationDiff <= 8.0) {
+                  matchStatus = "Warning";
+                  matchStatusColor = "text-yellow-400 border-yellow-500/30 bg-yellow-500/5";
+                } else {
+                  matchStatus = "Poor Match";
+                  matchStatusColor = "text-red-400 border-red-500/30 bg-red-500/5";
+                }
+
+                // Gaps calculation
+                const sortedVideoItems = activeProject
+                  ? [...activeProject.timeline.tracks.video].sort((a, b) => a.start - b.start)
+                  : [];
+                const gaps: { start: number; end: number; duration: number }[] = [];
+                let currentEnd = 0;
+                for (const item of sortedVideoItems) {
+                  if (item.start > currentEnd + 0.1) {
+                    gaps.push({ start: currentEnd, end: item.start, duration: item.start - currentEnd });
+                  }
+                  currentEnd = Math.max(currentEnd, item.start + item.duration);
+                }
+                const totalGapsDuration = gaps.reduce((sum, g) => sum + g.duration, 0);
+
+                // Suggestion logic
+                let syncSuggestion = "Write or generate a script to get started.";
+                if (wordsCount > 0) {
+                  if (estDuration > videoDuration) {
+                    syncSuggestion = `⚠️ Script is longer than video track by ${(estDuration - videoDuration).toFixed(1)}s. Add more clips or extend existing ones.`;
+                  } else if (videoDuration > estDuration) {
+                    syncSuggestion = `⚠️ Video track is longer than script by ${(videoDuration - estDuration).toFixed(1)}s. Trim excess video or expand your script.`;
+                  } else {
+                    syncSuggestion = "✨ Narration script duration matches your video track timeline perfectly!";
+                  }
+                }
+                if (gaps.length > 0) {
+                  syncSuggestion += ` Also found ${gaps.length} gap(s) (totaling ${totalGapsDuration.toFixed(1)}s) on the video track. Close these gaps to avoid black screens.`;
+                }
+
+                const isShortsCompatible = estDuration <= 60;
+
+                return (
+                  <div className="flex flex-col gap-4">
+                    {/* Input Workspace */}
+                    <div className="flex flex-col gap-2">
+                      <span className="text-[10px] text-gray-500 font-bold uppercase">Generate Narration Script</span>
+                      <div className="flex gap-1 bg-[#12121a] p-1 rounded-lg border border-[#22222f]">
+                        <button
+                          type="button"
+                          onClick={() => setNarrationInputMode("topic")}
+                          className={`flex-1 py-1 text-[10px] font-bold rounded transition-all cursor-pointer ${
+                            narrationInputMode === "topic" ? "bg-indigo-600 text-white" : "text-gray-500 hover:text-gray-300"
+                          }`}
+                        >
+                          Topic
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNarrationInputMode("notes")}
+                          className={`flex-1 py-1 text-[10px] font-bold rounded transition-all cursor-pointer ${
+                            narrationInputMode === "notes" ? "bg-indigo-600 text-white" : "text-gray-500 hover:text-gray-300"
+                          }`}
+                        >
+                          Notes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNarrationInputMode("raw")}
+                          className={`flex-1 py-1 text-[10px] font-bold rounded transition-all cursor-pointer ${
+                            narrationInputMode === "raw" ? "bg-indigo-600 text-white" : "text-gray-500 hover:text-gray-300"
+                          }`}
+                        >
+                          Raw Text
+                        </button>
+                      </div>
+                      <textarea
+                        value={narrationInputValue}
+                        onChange={(e) => setNarrationInputValue(e.target.value)}
+                        placeholder={
+                          narrationInputMode === "topic"
+                            ? "e.g., The history of anti-gravity machines..."
+                            : narrationInputMode === "notes"
+                            ? "e.g., - First point\n- Second point\n- Third point..."
+                            : "e.g., Type or paste your raw narration script draft here..."
+                        }
+                        className="w-full h-20 bg-[#1c1c28] border border-[#22222f] text-xs px-2.5 py-1.5 rounded-lg outline-none text-white focus:border-indigo-500 resize-none font-sans"
+                      />
+                      <button
+                        onClick={() => handleGenerateScript()}
+                        disabled={isGeneratingScript || !narrationInputValue.trim() || !activeProject}
+                        className="w-full py-2 bg-indigo-600/25 border border-indigo-500/50 hover:bg-indigo-600/50 disabled:opacity-40 rounded-lg text-xs font-bold text-indigo-300 flex items-center justify-center gap-1.5 cursor-pointer shadow active:scale-95 transition-all"
+                      >
+                        {isGeneratingScript ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                        <span>Generate Script</span>
+                      </button>
+                    </div>
+
+                    {/* Script Workspace */}
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-[10px] text-gray-500 font-bold uppercase">Narration Script Workspace</span>
+                      <textarea
+                        value={generatedScript}
+                        onChange={(e) => setGeneratedScript(e.target.value)}
+                        placeholder="Generated script will appear here. You can also edit it directly..."
+                        className="w-full h-32 bg-[#1c1c28] border border-[#22222f] text-xs px-2.5 py-1.5 rounded-lg outline-none text-white focus:border-indigo-500 font-sans leading-relaxed"
+                      />
+                      
+                      <div className="grid grid-cols-2 gap-1.5 mt-1.5">
+                        <button
+                          onClick={() => handleGenerateScript("shorter")}
+                          disabled={isGeneratingScript || !generatedScript.trim()}
+                          className="py-1 bg-[#1a1a24] hover:bg-[#222230] border border-[#2c2c3e] disabled:opacity-40 rounded text-[10px] text-gray-300 font-semibold cursor-pointer transition-all active:scale-95"
+                        >
+                          Shorter
+                        </button>
+                        <button
+                          onClick={() => handleGenerateScript("longer")}
+                          disabled={isGeneratingScript || !generatedScript.trim()}
+                          className="py-1 bg-[#1a1a24] hover:bg-[#222230] border border-[#2c2c3e] disabled:opacity-40 rounded text-[10px] text-gray-300 font-semibold cursor-pointer transition-all active:scale-95"
+                        >
+                          Longer
+                        </button>
+                        <button
+                          onClick={() => handleGenerateScript("exciting")}
+                          disabled={isGeneratingScript || !generatedScript.trim()}
+                          className="py-1 bg-[#1a1a24] hover:bg-[#222230] border border-[#2c2c3e] disabled:opacity-40 rounded text-[10px] text-gray-300 font-semibold cursor-pointer transition-all active:scale-95"
+                        >
+                          More Exciting
+                        </button>
+                        <button
+                          onClick={() => handleGenerateScript("professional")}
+                          disabled={isGeneratingScript || !generatedScript.trim()}
+                          className="py-1 bg-[#1a1a24] hover:bg-[#222230] border border-[#2c2c3e] disabled:opacity-40 rounded text-[10px] text-gray-300 font-semibold cursor-pointer transition-all active:scale-95"
+                        >
+                          Professional
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Stats Card */}
+                    <div className="bg-[#12121a]/80 border border-[#22222f] p-2.5 rounded-lg flex items-center justify-between text-xs">
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-500 font-semibold uppercase">Words</span>
+                        <span className="font-mono font-bold text-white">{wordsCount}</span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-500 font-semibold uppercase">Est. Speaking Time</span>
+                        <span className="font-mono font-bold text-indigo-400">{estDuration.toFixed(1)}s</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`w-2 h-2 rounded-full ${isShortsCompatible ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                        <span className="text-[10px] font-bold text-gray-300">
+                          {isShortsCompatible ? "Shorts OK" : "Too Long"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Timeline Sync Assistant */}
+                    <div className={`border p-3 rounded-lg flex flex-col gap-2 ${matchStatusColor}`}>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold uppercase tracking-wider">Sync Status</span>
+                        <span className="text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-black/40 border border-white/5">{matchStatus}</span>
+                      </div>
+                      <div className="flex flex-col gap-1 text-[11px]">
+                        <div className="flex justify-between text-gray-400">
+                          <span>Narration Script Length:</span>
+                          <span className="font-mono text-white">{estDuration.toFixed(1)}s</span>
+                        </div>
+                        <div className="flex justify-between text-gray-400">
+                          <span>Timeline Video Track:</span>
+                          <span className="font-mono text-white">{videoDuration.toFixed(1)}s</span>
+                        </div>
+                        {gaps.length > 0 && (
+                          <div className="flex justify-between text-yellow-500 font-bold">
+                            <span>Video Gaps Total:</span>
+                            <span className="font-mono">{totalGapsDuration.toFixed(1)}s</span>
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-gray-300 mt-1 italic font-medium">
+                        {syncSuggestion}
+                      </p>
+                    </div>
+
+                    {/* TTS Configuration */}
+                    <div className="bg-[#12121a] border border-[#22222f] p-3 rounded-lg flex flex-col gap-3">
+                      <span className="text-[10px] text-gray-500 font-bold uppercase">TTS Engine Settings</span>
+
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase">TTS Provider</span>
+                        <select
+                          value={ttsProvider}
+                          onChange={(e) => {
+                            const prov = e.target.value as "openai" | "elevenlabs";
+                            setTtsProvider(prov);
+                            if (prov === "openai") {
+                              setTtsVoice("alloy");
+                              setTtsModel("tts-1");
+                            } else {
+                              setTtsVoice("pNInz6obpgq5mWzIA5B5");
+                              setTtsModel("eleven_monolingual_v1");
+                            }
+                          }}
+                          className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-2.5 py-1.5 rounded-lg outline-none cursor-pointer"
+                        >
+                          <option value="openai" disabled={!apiKeysStatus.openai}>OpenAI TTS</option>
+                          <option value="elevenlabs" disabled={!apiKeysStatus.elevenlabs}>ElevenLabs</option>
+                        </select>
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase">Voice</span>
+                        <select
+                          value={ttsVoice}
+                          onChange={(e) => setTtsVoice(e.target.value)}
+                          className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-2.5 py-1.5 rounded-lg outline-none cursor-pointer"
+                        >
+                          {ttsProvider === "openai" ? (
+                            <>
+                              <option value="alloy">Alloy (Neutral)</option>
+                              <option value="echo">Echo (Warm)</option>
+                              <option value="fable">Fable (Narrative)</option>
+                              <option value="onyx">Onyx (Deep/Male)</option>
+                              <option value="nova">Nova (Bright/Female)</option>
+                              <option value="shimmer">Shimmer (Professional)</option>
+                            </>
+                          ) : (
+                            <>
+                              <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female, pleasant)</option>
+                              <option value="AZnzlk1XvdvUeBnXmlld">Domi (Female, energetic)</option>
+                              <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female, soft)</option>
+                              <option value="ErXwobaYiN019PkySvjV">Antoni (Male, warm)</option>
+                              <option value="MF3mGyEYCl7XYWbV9VbO">Elli (Female, narration)</option>
+                              <option value="TxGEqn7nUaPPxgCj0JB1">Josh (Male, deep)</option>
+                              <option value="pNInz6obpgq5mWzIA5B5">Adam (Male, professional)</option>
+                            </>
+                          )}
+                        </select>
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <div className="flex justify-between items-center text-[10px] text-gray-500 font-bold uppercase">
+                          <span>Speaking Speed</span>
+                          <span className="font-mono text-indigo-400">{ttsSpeed.toFixed(2)}x</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.5"
+                          max="2.0"
+                          step="0.05"
+                          value={ttsSpeed}
+                          onChange={(e) => setTtsSpeed(parseFloat(e.target.value))}
+                          className="w-full h-1 bg-[#22222f] rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase">TTS Model</span>
+                        {ttsProvider === "openai" ? (
+                          <select
+                            value={ttsModel}
+                            onChange={(e) => setTtsModel(e.target.value)}
+                            className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-2.5 py-1.5 rounded-lg outline-none cursor-pointer"
+                          >
+                            <option value="tts-1">TTS 1 (Standard)</option>
+                            <option value="tts-1-hd">TTS 1 HD (High Quality)</option>
+                          </select>
+                        ) : (
+                          <select
+                            disabled
+                            value="eleven_monolingual_v1"
+                            className="bg-[#1c1c28] border border-[#22222f] text-xs text-gray-500 px-2.5 py-1.5 rounded-lg outline-none cursor-not-allowed"
+                          >
+                            <option value="eleven_monolingual_v1">Eleven Monolingual v1</option>
+                          </select>
+                        )}
+                      </div>
+
+                      <button
+                        onClick={handleGenerateVoiceover}
+                        disabled={isGeneratingVoiceover || !generatedScript.trim() || !activeProject}
+                        className="w-full py-2 bg-emerald-600/25 border border-emerald-500/50 hover:bg-emerald-600/50 disabled:opacity-40 rounded-lg text-xs font-bold text-emerald-300 flex items-center justify-center gap-1.5 cursor-pointer shadow active:scale-95 transition-all"
+                      >
+                        {isGeneratingVoiceover ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Volume2 className="w-3.5 h-3.5" />}
+                        <span>Generate Voiceover Audio</span>
+                      </button>
+                    </div>
+
+                    {/* Subtitle Alignment Preview */}
+                    {generatedSubtitles.length > 0 && (
+                      <div className="flex flex-col gap-2 border-t border-[#22222f] pt-3">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase">Aligned Subtitles Preview ({generatedSubtitles.length} lines)</span>
+                        <div className="flex flex-col gap-1 max-h-36 overflow-y-auto bg-[#12121a] border border-[#22222f] p-2 rounded-lg">
+                          {generatedSubtitles.map((sub, i) => (
+                            <div key={i} className="flex justify-between items-center text-[10px] font-mono py-0.5 border-b border-[#22222f]/30 last:border-b-0">
+                              <span className="text-gray-500">[{sub.start.toFixed(1)}s - {(sub.start + sub.duration).toFixed(1)}s]</span>
+                              <span className="text-white truncate max-w-[180px]">{sub.text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Insert Into Timeline */}
+                    {ttsVoiceoverAsset && (
+                      <div className="flex flex-col gap-2 bg-emerald-950/20 border border-emerald-900/40 p-3 rounded-lg">
+                        <span className="text-[10px] text-emerald-400 font-bold uppercase flex items-center gap-1">
+                          <CheckCircle className="w-3.5 h-3.5" /> Voiceover Ready!
+                        </span>
+                        <div className="text-[10px] text-gray-300">
+                          Duration: <span className="font-mono text-emerald-300 font-bold">{ttsVoiceoverAsset.duration?.toFixed(1)}s</span>
+                        </div>
+                        <button
+                          onClick={handleInsertNarrationToTimeline}
+                          className="w-full py-2 bg-emerald-600 text-white hover:bg-emerald-500 rounded-lg text-xs font-bold transition-all shadow active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Insert Into Timeline
+                        </button>
+                      </div>
+                    )}
+
+                    {/* YouTube Shorts Metadata Generator */}
+                    <div className="flex flex-col gap-2 border-t border-[#22222f] pt-3">
+                      <button
+                        onClick={handleGenerateNarrationMetadata}
+                        disabled={isGeneratingNarrationMetadata || !generatedScript.trim() || !activeProject}
+                        className="w-full py-2 bg-indigo-600/25 border border-indigo-500/50 hover:bg-indigo-600/50 disabled:opacity-40 rounded-lg text-xs font-bold text-indigo-300 flex items-center justify-center gap-1.5 cursor-pointer shadow active:scale-95 transition-all"
+                      >
+                        {isGeneratingNarrationMetadata ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                        <span>Generate YouTube Metadata</span>
+                      </button>
+
+                      {narrationMetadata && (
+                        <div className="flex flex-col gap-3 mt-2 max-h-96 overflow-y-auto pr-1">
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[9px] text-[#8c8cb2] font-bold uppercase">Video Title Ideas</span>
+                            <div className="flex flex-col gap-1">
+                              {narrationMetadata.titles.map((title, i) => (
+                                <div key={i} className="bg-[#12121a] border border-[#22222f] p-2 rounded text-[11px] flex justify-between items-center gap-2">
+                                  <span className="font-semibold text-white truncate">{title}</span>
+                                  <button
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(title);
+                                      alert("Title copied to clipboard!");
+                                    }}
+                                    className="text-gray-400 hover:text-indigo-400"
+                                  >
+                                    <Copy className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[9px] text-[#8c8cb2] font-bold uppercase">YouTube Description</span>
+                            <div className="bg-[#12121a] border border-[#22222f] p-2.5 rounded text-[11px] text-gray-400 relative">
+                              <p className="max-h-24 overflow-y-auto whitespace-pre-wrap font-sans leading-relaxed">{narrationMetadata.description}</p>
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(narrationMetadata.description);
+                                  alert("Description copied!");
+                                }}
+                                className="absolute top-2 right-2 text-gray-400 hover:text-indigo-400"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[9px] text-[#8c8cb2] font-bold uppercase">Tags / Hashtags</span>
+                            <div className="flex flex-wrap gap-1 bg-[#12121a] border border-[#22222f] p-2 rounded max-h-16 overflow-y-auto">
+                              {narrationMetadata.tags.map((tag, i) => (
+                                <span key={i} className="text-[9px] bg-indigo-950/40 border border-indigo-900/40 text-indigo-300 px-1.5 py-0.5 rounded font-mono">
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>
@@ -3042,6 +3682,17 @@ export default function VideoEditorWorkspace() {
                   placeholder={apiKeysStatus.gemini ? "Configured (Overwrite...)" : "Enter Gemini key"}
                   value={geminiKeyInput}
                   onChange={(e) => setGeminiKeyInput(e.target.value)}
+                  className="bg-[#1c1c28] border border-[#22222f] text-xs px-2.5 py-1.5 rounded outline-none text-white focus:border-indigo-500"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-gray-500 font-bold uppercase">ElevenLabs TTS Key</label>
+                <input
+                  type="password"
+                  placeholder={apiKeysStatus.elevenlabs ? "Configured (Overwrite...)" : "Enter ElevenLabs key"}
+                  value={elevenlabsKeyInput}
+                  onChange={(e) => setElevenlabsKeyInput(e.target.value)}
                   className="bg-[#1c1c28] border border-[#22222f] text-xs px-2.5 py-1.5 rounded outline-none text-white focus:border-indigo-500"
                 />
               </div>

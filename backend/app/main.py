@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.app.config import STORAGE_DIR, CORS_ORIGINS
-from backend.app.routers import projects, videos, timeline, audio, ai
+from backend.app.routers import projects, videos, timeline, audio, ai, narration
 
 app = FastAPI(
     title="video-short-generator API",
@@ -28,6 +28,7 @@ app.include_router(videos.router)
 app.include_router(timeline.router)
 app.include_router(audio.router)
 app.include_router(ai.router)
+app.include_router(narration.router)
 
 @app.get("/")
 def read_root():

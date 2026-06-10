@@ -17,17 +17,18 @@ def save_api_keys(keys: Dict[str, str]):
 def load_api_keys() -> Dict[str, str]:
     """Loads API keys from the local JSON file."""
     if not API_KEYS_FILE.exists():
-        return {"openai": "", "anthropic": "", "gemini": ""}
+        return {"openai": "", "anthropic": "", "gemini": "", "elevenlabs": ""}
     try:
         with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return {
                 "openai": data.get("openai", ""),
                 "anthropic": data.get("anthropic", ""),
-                "gemini": data.get("gemini", "")
+                "gemini": data.get("gemini", ""),
+                "elevenlabs": data.get("elevenlabs", "")
             }
     except Exception:
-        return {"openai": "", "anthropic": "", "gemini": ""}
+        return {"openai": "", "anthropic": "", "gemini": "", "elevenlabs": ""}
 
 async def call_llm(provider: str, prompt: str, system_instruction: str = "") -> str:
     """Invokes the selected LLM provider via REST calls."""

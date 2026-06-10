@@ -198,4 +198,41 @@ def detect_silence(file_path: str, noise_threshold: float = -30.0, min_duration:
         print(f"Error executing silencedetect: {e}")
         return []
 
+def adjust_audio_speed(input_path: str, output_path: str, speed: float) -> bool:
+    """Adjusts the playback speed of an audio file using FFmpeg's atempo filter."""
+    if speed == 1.0:
+        if input_path != output_path:
+            import shutil
+            shutil.copy(input_path, output_path)
+        return True
+        
+    tempo = speed
+    filters = []
+    while tempo > 2.0:
+        filters.append("atempo=2.0")
+        tempo /= 2.0
+    while tempo < 0.5:
+        filters.append("atempo=0.5")
+        tempo /= 0.5
+    filters.append(f"atempo={tempo:.2f}")
+    filter_str = ",".join(filters)
+    
+    cmd = [
+        FFMPEG_PATH,
+        "-y",
+        "-i", input_path,
+        "-filter:a", filter_str,
+        output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, capture_output=True, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"FFmpeg adjust_audio_speed error: {e.stderr}")
+        return False
+    except Exception as e:
+        print(f"General error adjust_audio_speed: {e}")
+        return False
+
 

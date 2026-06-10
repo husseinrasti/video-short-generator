@@ -11,11 +11,13 @@ class KeysSaveRequest(BaseModel):
     openai: str = ""
     anthropic: str = ""
     gemini: str = ""
+    elevenlabs: str = ""
 
 class KeysStatusResponse(BaseModel):
     openai: bool
     anthropic: bool
     gemini: bool
+    elevenlabs: bool
 
 class AIRequest(BaseModel):
     projectId: str
@@ -42,7 +44,8 @@ def get_keys_status():
     return KeysStatusResponse(
         openai=bool(keys.get("openai", "").strip()),
         anthropic=bool(keys.get("anthropic", "").strip()),
-        gemini=bool(keys.get("gemini", "").strip())
+        gemini=bool(keys.get("gemini", "").strip()),
+        elevenlabs=bool(keys.get("elevenlabs", "").strip())
     )
 
 @router.post("/keys", status_code=status.HTTP_204_NO_CONTENT)
