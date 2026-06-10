@@ -1,0 +1,30 @@
+# Python Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python Cache & Tests
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Storage Directory (media assets, local configurations)
+storage/
+
+# Node.js & Next.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+.next/
+out/
+build/
+dist/
+.npm
+frontend/.npm
+
+# OS Files
+.DS_Store
+Thumbs.db
