@@ -13,6 +13,9 @@ SUBTITLES_DIR = STORAGE_DIR / "subtitles"
 PROJECTS_DIR = STORAGE_DIR / "projects"
 RENDERS_DIR = STORAGE_DIR / "renders"
 TEMP_DIR = STORAGE_DIR / "temp"
+MODELS_DIR = STORAGE_DIR / "models"
+WHISPER_MODELS_DIR = MODELS_DIR / "whisper"
+KOKORO_MODELS_DIR = MODELS_DIR / "kokoro"
 
 # Ensure all directories exist
 for directory in [
@@ -24,6 +27,9 @@ for directory in [
     PROJECTS_DIR,
     RENDERS_DIR,
     TEMP_DIR,
+    MODELS_DIR,
+    WHISPER_MODELS_DIR,
+    KOKORO_MODELS_DIR,
 ]:
     directory.mkdir(parents=True, exist_ok=True)
 

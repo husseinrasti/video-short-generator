@@ -13,6 +13,10 @@ from backend.app.utils.tts import generate_openai_tts, generate_elevenlabs_tts
 from backend.app.utils.ffmpeg import adjust_audio_speed, get_video_metadata
 from backend.app.utils.whisper_transcribe import get_whisper_model
 from backend.app.models.project import Asset, SubtitleTrackItem
+from backend.app.providers.tts import KokoroLocalProvider
+
+# Instantiate local TTS provider
+kokoro_provider = KokoroLocalProvider()
 
 router = APIRouter(prefix="/api/narration", tags=["narration"])
 
@@ -30,10 +34,11 @@ class ScriptGenerateResponse(BaseModel):
 class VoiceoverGenerateRequest(BaseModel):
     projectId: str
     script: str
-    provider: str = Field("openai", description="openai or elevenlabs")
+    provider: str = Field("openai", description="openai, elevenlabs, or kokoro")
     voice: str
     speed: float = 1.0
     model: Optional[str] = None
+    outputFormat: Optional[str] = Field("mp3", description="mp3 or wav")
 
 class SubtitlesGenerateRequest(BaseModel):
     projectId: str
@@ -108,7 +113,7 @@ async def generate_narration_script(request: ScriptGenerateRequest):
 
 @router.post("/generate-voiceover", response_model=Asset, status_code=status.HTTP_201_CREATED)
 async def generate_narration_voiceover(request: VoiceoverGenerateRequest):
-    """Invokes TTS (OpenAI or ElevenLabs) to generate narration voiceover, saves it locally as a project asset."""
+    """Invokes TTS (OpenAI, ElevenLabs, or local Kokoro) to generate narration voiceover, saves it locally as a project asset."""
     project = load_project(request.projectId)
     if not project:
         raise HTTPException(
@@ -118,41 +123,52 @@ async def generate_narration_voiceover(request: VoiceoverGenerateRequest):
 
     # Output file settings
     asset_id = str(uuid.uuid4())
-    filename = f"narration_{asset_id}.mp3"
+    ext = "wav" if request.outputFormat and request.outputFormat.lower() == "wav" else "mp3"
+    filename = f"narration_{asset_id}.{ext}"
     audio_path = AUDIO_DIR / filename
     temp_path = AUDIO_DIR / f"temp_{filename}"
 
     try:
         provider = request.provider.lower()
-        if provider == "openai":
-            await generate_openai_tts(
+        if provider == "kokoro":
+            # Kokoro is a fully local offline TTS pipeline
+            kokoro_provider.generate_speech(
                 text=request.script,
                 voice=request.voice,
                 speed=request.speed,
-                model=request.model or "tts-1",
-                output_path=temp_path
-            )
-        elif provider == "elevenlabs":
-            await generate_elevenlabs_tts(
-                text=request.script,
-                voice=request.voice,
-                model=request.model or "eleven_monolingual_v1",
-                output_path=temp_path
+                output_path=audio_path
             )
         else:
-            raise ValueError(f"Unsupported TTS provider: {request.provider}")
+            if provider == "openai":
+                await generate_openai_tts(
+                    text=request.script,
+                    voice=request.voice,
+                    speed=request.speed,
+                    model=request.model or "tts-1",
+                    output_path=temp_path
+                )
+            elif provider == "elevenlabs":
+                await generate_elevenlabs_tts(
+                    text=request.script,
+                    voice=request.voice,
+                    model=request.model or "eleven_monolingual_v1",
+                    output_path=temp_path
+                )
+            else:
+                raise ValueError(f"Unsupported TTS provider: {request.provider}")
 
-        # Speed adjustment if ElevenLabs (or generic backup)
-        # OpenAI supports speed natively, but if ElevenLabs was called, we adjust speed via FFmpeg locally
-        if provider == "elevenlabs" and request.speed != 1.0:
-            success = adjust_audio_speed(str(temp_path), str(audio_path), request.speed)
-            if not success:
-                raise RuntimeError("FFmpeg speed adjustment failed")
-            if temp_path.exists():
-                temp_path.unlink()
-        else:
-            if temp_path.exists():
-                os.rename(temp_path, audio_path)
+            # Apply speed adjustment or format conversion via FFmpeg if necessary
+            # OpenAI handles speed natively on API side, ElevenLabs requires post-processing for speed
+            needs_processing = (provider == "elevenlabs" and request.speed != 1.0) or ext == "wav"
+            if needs_processing:
+                success = adjust_audio_speed(str(temp_path), str(audio_path), 1.0 if provider == "openai" else request.speed)
+                if not success:
+                    raise RuntimeError("FFmpeg speed adjustment/format conversion failed")
+                if temp_path.exists():
+                    temp_path.unlink()
+            else:
+                if temp_path.exists():
+                    os.rename(temp_path, audio_path)
 
         # Retrieve audio duration
         metadata = get_video_metadata(str(audio_path))

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import whisper
 from datetime import datetime, timezone
-from backend.app.config import VIDEOS_DIR, SUBTITLES_DIR
+from backend.app.config import VIDEOS_DIR, SUBTITLES_DIR, WHISPER_MODELS_DIR
 from backend.app.utils.storage import load_project, save_project
 from backend.app.models.project import SubtitleTrackItem
 
@@ -22,8 +22,8 @@ def get_whisper_model(model_name: str = "tiny") -> whisper.Whisper:
     global _WHISPER_MODEL
     with model_lock:
         if _WHISPER_MODEL is None:
-            print(f"Loading local Whisper model '{model_name}'...")
-            _WHISPER_MODEL = whisper.load_model(model_name)
+            print(f"Loading local Whisper model '{model_name}' from {WHISPER_MODELS_DIR}...")
+            _WHISPER_MODEL = whisper.load_model(model_name, download_root=str(WHISPER_MODELS_DIR))
             print("Whisper model loaded successfully.")
         return _WHISPER_MODEL
 
