@@ -88,8 +88,42 @@ The FastAPI Swagger interactive documentation will be available at `http://local
    ```bash
    npm run dev
    ```
-
 Open `http://localhost:3000` in your browser to interact with the web app.
+
+---
+
+## 🚀 Running the Application
+
+You can run both the Backend and Frontend components simultaneously or individually.
+
+### Quick Start (Recommended)
+A root-level helper script `run.sh` is provided to check dependencies, handle port conflicts, run both servers in parallel, and cleanly terminate them on exit.
+
+1. Ensure the setup steps for both backend and frontend are completed.
+2. Run the helper script from the root directory:
+   ```bash
+   ./run.sh
+   ```
+3. Open [http://localhost:3000](http://localhost:3000) in your browser.
+4. Press `Ctrl + C` in the terminal to stop both servers at any time.
+
+### Manual Startup
+
+If you prefer starting each service individually in separate terminal sessions:
+
+#### 1. Start Backend Server
+```bash
+# From the root directory
+PYTHONPATH=. .venv/bin/uvicorn backend.app.main:app --port 8000 --reload
+```
+Interactive API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+
+#### 2. Start Frontend Server
+```bash
+# From the root directory
+npm run dev --prefix frontend
+```
+Web client interface: [http://localhost:3000](http://localhost:3000)
 
 ---
 
