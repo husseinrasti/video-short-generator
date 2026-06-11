@@ -22,11 +22,15 @@ AI-Assisted Local Video Editor for Shorts Creation
 ### 3. AI Narration Studio
 * **AI Script Generator**: LLM-powered assistant (OpenAI, Anthropic Claude, Gemini) with preset rewrite modifiers (*Shorter*, *Longer*, *More Exciting*, *More Professional*).
 * **AI Model Selection**: Selector dropdown populated dynamically from the backend provider listing, showing name, provider, and context window metrics.
-* **Local TTS Engine**: Synthesis using OpenAI or ElevenLabs, with precise speed controls processed via the FFmpeg `atempo` filter.
+* **Hybrid TTS Engines**: Voice synthesis using cloud APIs (OpenAI, ElevenLabs) or running fully local offline utilizing **Kokoro Local** with adjust speed controls.
 * **Auto-Subtitles**: Fast, local speech-to-text alignment powered by Whisper.
 * **Sync Assistant**: Real-time validation checking speech duration against video footage coverage, pointing out gaps and offering repair suggestions.
 
-### 4. Overlays & Rendering
+### 4. Local Offline AI Pipeline
+* **One-Click Model Setup**: Built-in downloader to download, verify integrity, and store Whisper and Kokoro models locally.
+* **Fully Offline & Private**: Whisper Local (Speech-to-Text) and Kokoro Local (Text-to-Speech) operate completely offline with zero API keys or external server dependencies.
+
+### 5. Overlays & Rendering
 * **Overlay Controls**: Add layered text and image overlays with coordinates, size, weight, shadow, and background styles.
 * **FFmpeg Pipeline**: Scales, pads/letterboxes, and overlays tracks according to desired aspect ratios (`9:16`, `16:9`, `1:1`) and resolutions (`720p`, `1080p`, `1440p`).
 * **Active Cancellation**: Terminate background downloads, transcribe tasks, and FFmpeg render compiles instantly.
@@ -35,7 +39,7 @@ AI-Assisted Local Video Editor for Shorts Creation
 
 ## 🛠️ Tech Stack
 
-* **Backend**: FastAPI (Python), FFmpeg, `yt-dlp`, Pydantic database models.
+* **Backend**: FastAPI (Python), FFmpeg, `yt-dlp`, `kokoro-onnx` (ONNX Runtime), `openai-whisper` (STT), Pydantic database models.
 * **Frontend**: Next.js, React, TypeScript, Tailwind CSS, Lucide icons.
 * **State Management**: Local JSON persistence for projects, assets, and rendering tasks, paired with a React state undo/redo stack.
 
