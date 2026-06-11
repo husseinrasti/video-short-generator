@@ -31,7 +31,9 @@ import {
   Key,
   Copy,
   Scissors as TrimIcon,
-  VolumeX
+  VolumeX,
+  Cpu,
+  Check
 } from "lucide-react";
 
 // API Base URL config
@@ -231,6 +233,23 @@ export default function VideoEditorWorkspace() {
   // AI Panel & API Keys state (Phase 7)
   const [apiKeysStatus, setApiKeysStatus] = useState<AIKeyStatus>({ openai: false, anthropic: false, gemini: false, elevenlabs: false });
   const [showKeysModal, setShowKeysModal] = useState(false);
+  
+  interface LocalAIStatus {
+    status: "not_installed" | "installing" | "ready" | "error" | "cancelled";
+    progress: number;
+    error: string | null;
+    current_file: string;
+    whisper: "not_installed" | "ready";
+    kokoro: "not_installed" | "ready";
+  }
+  const [localAIStatus, setLocalAIStatus] = useState<LocalAIStatus>({
+    status: "not_installed",
+    progress: 0.0,
+    error: null,
+    current_file: "",
+    whisper: "not_installed",
+    kokoro: "not_installed"
+  });
   const [openaiKeyInput, setOpenaiKeyInput] = useState("");
   const [anthropicKeyInput, setAnthropicKeyInput] = useState("");
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
@@ -252,10 +271,11 @@ export default function VideoEditorWorkspace() {
   const [narrationInputValue, setNarrationInputValue] = useState("");
   const [generatedScript, setGeneratedScript] = useState("");
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
-  const [ttsProvider, setTtsProvider] = useState<"openai" | "elevenlabs">("openai");
+  const [ttsProvider, setTtsProvider] = useState<"openai" | "elevenlabs" | "kokoro">("openai");
   const [ttsVoice, setTtsVoice] = useState("alloy");
   const [ttsSpeed, setTtsSpeed] = useState(1.0);
   const [ttsModel, setTtsModel] = useState("tts-1");
+  const [ttsOutputFormat, setTtsOutputFormat] = useState<"mp3" | "wav">("mp3");
   const [isGeneratingVoiceover, setIsGeneratingVoiceover] = useState(false);
   const [ttsVoiceoverAsset, setTtsVoiceoverAsset] = useState<Asset | null>(null);
   const [generatedSubtitles, setGeneratedSubtitles] = useState<SubtitleTrackItem[]>([]);
@@ -313,7 +333,21 @@ export default function VideoEditorWorkspace() {
   useEffect(() => {
     fetchProjects();
     fetchKeysStatus();
+    fetchLocalAIStatus();
   }, []);
+
+  // Poll local AI installation progress
+  useEffect(() => {
+    let interval: any;
+    if (localAIStatus.status === "installing") {
+      interval = setInterval(() => {
+        fetchLocalAIStatus();
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [localAIStatus.status]);
 
   // Fetch AI models when provider or tab changes
   useEffect(() => {
@@ -722,6 +756,50 @@ export default function VideoEditorWorkspace() {
       }
     } catch (err) {
       console.error("Redo failed", err);
+    }
+  };
+
+  const fetchLocalAIStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/ai/local-status`);
+      if (res.ok) {
+        const data = await res.json();
+        setLocalAIStatus(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch local AI status", err);
+    }
+  };
+
+  const handleInstallLocalAI = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/ai/install-local`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        setLocalAIStatus((prev) => ({ ...prev, status: "installing", progress: 0.0, error: null }));
+      } else {
+        const err = await res.json();
+        alert(`Failed to start installation: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`Error starting installation: ${e.message}`);
+    }
+  };
+
+  const handleCancelLocalAIInstall = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/ai/cancel-install`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        setLocalAIStatus((prev) => ({ ...prev, status: "cancelled" }));
+      } else {
+        const err = await res.json();
+        alert(`Failed to cancel: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`Error cancelling: ${e.message}`);
     }
   };
 
@@ -1431,6 +1509,12 @@ export default function VideoEditorWorkspace() {
   // Whisper transcription trigger
   const handleTranscribeAsset = async () => {
     if (!selectedAsset || !activeProject) return;
+    
+    if (localAIStatus.status !== "ready") {
+      alert("Local Whisper model is not installed. Please install it first in the Local AI Providers panel.");
+      return;
+    }
+    
     setIsTranscribing(true);
     try {
       const res = await fetch(`${API_BASE}/api/audio/transcribe`, {
@@ -1700,6 +1784,10 @@ export default function VideoEditorWorkspace() {
       alert("ElevenLabs API key is not configured for TTS.");
       return;
     }
+    if (ttsProvider === "kokoro" && localAIStatus.status !== "ready") {
+      alert("Local Kokoro TTS model is not installed. Please install it first in the Local AI Providers panel.");
+      return;
+    }
 
     setIsGeneratingVoiceover(true);
     setTtsVoiceoverAsset(null);
@@ -1714,7 +1802,8 @@ export default function VideoEditorWorkspace() {
           provider: ttsProvider,
           voice: ttsVoice,
           speed: ttsSpeed,
-          model: ttsProvider === "openai" ? ttsModel : "eleven_monolingual_v1"
+          model: ttsProvider === "openai" ? ttsModel : (ttsProvider === "kokoro" ? "kokoro-v1.0" : "eleven_monolingual_v1"),
+          outputFormat: ttsOutputFormat
         })
       });
 
@@ -3069,6 +3158,118 @@ export default function VideoEditorWorkspace() {
 
               {activeTab === "ai" && (
                 <div className="flex flex-col gap-4">
+                  {/* Local AI Providers Panel */}
+                  <div className="bg-[#13131e]/90 border border-[#22223c] rounded-xl p-3.5 flex flex-col gap-3">
+                    <div className="flex items-center gap-1.5 border-b border-[#22222f]/60 pb-2">
+                      <Cpu className="w-4 h-4 text-indigo-400" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">Local AI Providers</span>
+                    </div>
+                    
+                    <div className="flex flex-col gap-2.5 text-xs">
+                      {/* Whisper Local status */}
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-400 flex items-center gap-1.5">
+                          <Check className={`w-3.5 h-3.5 ${localAIStatus.whisper === "ready" ? "text-emerald-400 font-bold" : "text-gray-600"}`} />
+                          Speech-to-Text (Whisper Local)
+                        </span>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded font-mono ${
+                          localAIStatus.whisper === "ready" ? "bg-emerald-950/30 text-emerald-400 border border-emerald-900/30" : "bg-gray-800 text-gray-400"
+                        }`}>
+                          {localAIStatus.whisper === "ready" ? "Ready" : "Not Installed"}
+                        </span>
+                      </div>
+                      
+                      {/* Kokoro Local status */}
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-400 flex items-center gap-1.5">
+                          <Check className={`w-3.5 h-3.5 ${localAIStatus.kokoro === "ready" ? "text-emerald-400 font-bold" : "text-gray-600"}`} />
+                          Text-to-Speech (Kokoro Local)
+                        </span>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded font-mono ${
+                          localAIStatus.kokoro === "ready" ? "bg-emerald-950/30 text-emerald-400 border border-emerald-900/30" : "bg-gray-800 text-gray-400"
+                        }`}>
+                          {localAIStatus.kokoro === "ready" ? "Ready" : "Not Installed"}
+                        </span>
+                      </div>
+                    </div>
+                    
+                    {/* Setup / Progress controls */}
+                    <div className="mt-1">
+                      {localAIStatus.status === "not_installed" && (
+                        <button
+                          onClick={handleInstallLocalAI}
+                          className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Install Local AI Models</span>
+                        </button>
+                      )}
+                      
+                      {localAIStatus.status === "installing" && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex justify-between items-center text-[10px]">
+                            <span className="text-indigo-400 font-semibold animate-pulse">Installing... ({localAIStatus.progress}%)</span>
+                            <button
+                              onClick={handleCancelLocalAIInstall}
+                              className="text-[9px] bg-red-950/40 border border-red-900 text-red-400 px-2 py-0.5 rounded hover:bg-red-900 hover:text-white transition-all cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <div className="w-full bg-[#2a2a38] h-1.5 rounded-full overflow-hidden">
+                            <div
+                              className="bg-indigo-500 h-full rounded-full transition-all duration-300"
+                              style={{ width: `${localAIStatus.progress}%` }}
+                            ></div>
+                          </div>
+                          {localAIStatus.current_file && (
+                            <div className="text-[9px] text-gray-500 font-mono truncate">
+                              Downloading: {localAIStatus.current_file}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      
+                      {localAIStatus.status === "ready" && (
+                        <div className="bg-emerald-950/15 border border-emerald-900/30 text-emerald-400 p-2 rounded text-[11px] font-semibold text-center flex items-center justify-center gap-1">
+                          <CheckCircle className="w-4 h-4" />
+                          <span>All Local AI Models Ready</span>
+                        </div>
+                      )}
+                      
+                      {localAIStatus.status === "error" && (
+                        <div className="flex flex-col gap-1.5">
+                          <div className="text-red-400 text-[10px] bg-red-950/15 border border-red-900/30 p-2 rounded break-all max-h-16 overflow-y-auto leading-relaxed font-mono">
+                            Error: {localAIStatus.error || "Unknown installation error."}
+                          </div>
+                          <button
+                            onClick={handleInstallLocalAI}
+                            className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer text-center"
+                          >
+                            Retry Installation
+                          </button>
+                        </div>
+                      )}
+
+                      {localAIStatus.status === "cancelled" && (
+                        <div className="flex flex-col gap-1.5">
+                          <div className="text-yellow-400 text-[10px] bg-yellow-950/15 border border-yellow-900/30 p-2 rounded text-center font-medium">
+                            Installation Cancelled
+                          </div>
+                          <button
+                            onClick={handleInstallLocalAI}
+                            className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer text-center"
+                          >
+                            Restart Installation
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Divider */}
+                  <div className="border-b border-[#22222f]/60 my-0.5" />
+
                   {/* Select LLM model provider */}
                   <div className="flex flex-col gap-1.5">
                     <span className="text-[10px] text-gray-500 font-bold uppercase">LLM Provider Selection</span>
@@ -3448,20 +3649,24 @@ export default function VideoEditorWorkspace() {
                         <select
                           value={ttsProvider}
                           onChange={(e) => {
-                            const prov = e.target.value as "openai" | "elevenlabs";
+                            const prov = e.target.value as "openai" | "elevenlabs" | "kokoro";
                             setTtsProvider(prov);
                             if (prov === "openai") {
                               setTtsVoice("alloy");
                               setTtsModel("tts-1");
-                            } else {
+                            } else if (prov === "elevenlabs") {
                               setTtsVoice("pNInz6obpgq5mWzIA5B5");
                               setTtsModel("eleven_monolingual_v1");
+                            } else {
+                              setTtsVoice("af_heart");
+                              setTtsModel("kokoro-v1.0");
                             }
                           }}
                           className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-2.5 py-1.5 rounded-lg outline-none cursor-pointer"
                         >
                           <option value="openai" disabled={!apiKeysStatus.openai}>OpenAI TTS</option>
                           <option value="elevenlabs" disabled={!apiKeysStatus.elevenlabs}>ElevenLabs</option>
+                          <option value="kokoro" disabled={localAIStatus.status !== "ready"}>Kokoro Local (Offline)</option>
                         </select>
                       </div>
 
@@ -3481,7 +3686,7 @@ export default function VideoEditorWorkspace() {
                               <option value="nova">Nova (Bright/Female)</option>
                               <option value="shimmer">Shimmer (Professional)</option>
                             </>
-                          ) : (
+                          ) : ttsProvider === "elevenlabs" ? (
                             <>
                               <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female, pleasant)</option>
                               <option value="AZnzlk1XvdvUeBnXmlld">Domi (Female, energetic)</option>
@@ -3490,6 +3695,20 @@ export default function VideoEditorWorkspace() {
                               <option value="MF3mGyEYCl7XYWbV9VbO">Elli (Female, narration)</option>
                               <option value="TxGEqn7nUaPPxgCj0JB1">Josh (Male, deep)</option>
                               <option value="pNInz6obpgq5mWzIA5B5">Adam (Male, professional)</option>
+                            </>
+                          ) : (
+                            <>
+                              <option value="af_heart">Heart (US Female - Recommended)</option>
+                              <option value="af_bella">Bella (US Female)</option>
+                              <option value="af_sarah">Sarah (US Female)</option>
+                              <option value="af_nicole">Nicole (US Female)</option>
+                              <option value="af_sky">Sky (US Female)</option>
+                              <option value="am_adam">Adam (US Male)</option>
+                              <option value="am_michael">Michael (US Male)</option>
+                              <option value="bf_emma">Emma (UK Female)</option>
+                              <option value="bf_isabella">Isabella (UK Female)</option>
+                              <option value="bm_george">George (UK Male)</option>
+                              <option value="bm_lewis">Lewis (UK Male)</option>
                             </>
                           )}
                         </select>
@@ -3522,7 +3741,7 @@ export default function VideoEditorWorkspace() {
                             <option value="tts-1">TTS 1 (Standard)</option>
                             <option value="tts-1-hd">TTS 1 HD (High Quality)</option>
                           </select>
-                        ) : (
+                        ) : ttsProvider === "elevenlabs" ? (
                           <select
                             disabled
                             value="eleven_monolingual_v1"
@@ -3530,7 +3749,27 @@ export default function VideoEditorWorkspace() {
                           >
                             <option value="eleven_monolingual_v1">Eleven Monolingual v1</option>
                           </select>
+                        ) : (
+                          <select
+                            disabled
+                            value="kokoro-v1.0"
+                            className="bg-[#1c1c28] border border-[#22222f] text-xs text-gray-500 px-2.5 py-1.5 rounded-lg outline-none cursor-not-allowed"
+                          >
+                            <option value="kokoro-v1.0">Kokoro v1.0 (Local)</option>
+                          </select>
                         )}
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase">Output Format</span>
+                        <select
+                          value={ttsOutputFormat}
+                          onChange={(e) => setTtsOutputFormat(e.target.value as "mp3" | "wav")}
+                          className="bg-[#1c1c28] border border-[#22222f] text-xs text-white px-2.5 py-1.5 rounded-lg outline-none cursor-pointer"
+                        >
+                          <option value="mp3">MP3 Audio</option>
+                          <option value="wav">WAV Lossless</option>
+                        </select>
                       </div>
 
                       <button
@@ -3560,12 +3799,22 @@ export default function VideoEditorWorkspace() {
 
                     {/* Insert Into Timeline */}
                     {ttsVoiceoverAsset && (
-                      <div className="flex flex-col gap-2 bg-emerald-950/20 border border-emerald-900/40 p-3 rounded-lg">
+                      <div className="flex flex-col gap-2.5 bg-emerald-950/20 border border-emerald-900/40 p-3 rounded-lg">
                         <span className="text-[10px] text-emerald-400 font-bold uppercase flex items-center gap-1">
                           <CheckCircle className="w-3.5 h-3.5" /> Voiceover Ready!
                         </span>
                         <div className="text-[10px] text-gray-300">
                           Duration: <span className="font-mono text-emerald-300 font-bold">{ttsVoiceoverAsset.duration?.toFixed(1)}s</span>
+                        </div>
+                        {/* Audio Preview Element */}
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-gray-500 font-bold uppercase">Audio Preview</span>
+                          <audio
+                            src={`${API_BASE}/storage/${ttsVoiceoverAsset.path}`}
+                            controls
+                            className="w-full h-7 bg-transparent outline-none rounded"
+                            style={{ filter: "invert(90%) hue-rotate(180deg)" }}
+                          />
                         </div>
                         <button
                           onClick={handleInsertNarrationToTimeline}
