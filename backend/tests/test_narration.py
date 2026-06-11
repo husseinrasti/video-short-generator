@@ -178,3 +178,39 @@ def test_generate_metadata(mock_call_llm, test_project):
     assert data["titles"][0] == "Controversy 1"
     assert data["description"] == "Short description."
     assert "shorts" in data["tags"]
+
+@patch("backend.app.routers.narration.kokoro_provider")
+@patch("backend.app.routers.narration.get_video_metadata")
+def test_generate_voiceover_kokoro_success(mock_metadata, mock_kokoro, test_project):
+    mock_metadata.return_value = {"duration": 10.0, "width": 0, "height": 0}
+    
+    # Simulate kokoro_provider.generate_speech creating the final file
+    def side_effect(text, voice, speed, output_path):
+        with open(output_path, "w") as f:
+            f.write("mock audio data")
+            
+    mock_kokoro.generate_speech.side_effect = side_effect
+    
+    # WAV format test
+    response = client.post("/api/narration/generate-voiceover", json={
+        "projectId": test_project,
+        "script": "Hello from local Kokoro",
+        "provider": "kokoro",
+        "voice": "af_heart",
+        "speed": 1.2,
+        "outputFormat": "wav"
+    })
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["type"] == "audio"
+    assert data["duration"] == 10.0
+    assert "audio/narration_" in data["path"]
+    assert data["path"].endswith(".wav")
+    
+    # Cleanup created audio file
+    filename = data["path"].split("/")[-1]
+    audio_path = AUDIO_DIR / filename
+    if audio_path.exists():
+        audio_path.unlink()
+
